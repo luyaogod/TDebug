@@ -1,0 +1,64 @@
+{
+  "debug": {
+    "sshs": [
+      {
+        "name": "正式区",
+        "host": "10.0.0.1",
+        "port": 22,
+        "user": "tiptop",
+        "password": "tiptop",
+        "zone": "36",
+        "topent": "99",
+        "db": {
+          "type": "oracle",
+          "host": "10.0.0.1",
+          "port": 1521,
+          "service": "t35prd",
+          "accounts": [
+            {
+              "account": "dsdemo",
+              "password": "dsdemo"
+            },
+            {
+              "account": "ds",
+              "password": "ds"
+            }
+          ]
+        }
+      },
+      {
+        "name": "测试区",
+        "host": "10.0.0.2",
+        "port": 22,
+        "user": "tiptop",
+        "password": "tiptop",
+        "zone": "35",
+        "topent": "99",
+        "db": {
+          "type": "kingbase",
+          "host": "10.0.0.2",
+          "port": 54321,
+          "database": "topprd",
+          "accounts": [
+            {
+              "account": "dsdata",
+              "password": "dsdata"
+            },
+            {
+              "account": "ds",
+              "password": "ds"
+            }
+          ]
+        }
+      }
+    ],
+    "listen": "127.0.0.1:28670",
+    "launchArgs": "BBDL512840855a 2 12345 'N' {prog}",
+    "watchdogSeconds": 1800,
+    "fglserver": "",
+    "termWidth": 200,
+    "termHeight": 50,
+    "printElements": 1000,
+    "persistBreakpoints": null
+  }
+}

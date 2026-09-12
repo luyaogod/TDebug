@@ -1,0 +1,21 @@
+# 构建与打包产物
+/dist/
+*.exe
+/web/node_modules/
+# go:embed 依赖:clone 后需 cd web && npm install && npm run build
+/web/dist/
+
+# 运行时产物
+debug-bps/
+*.log
+.tdebug-serve.json
+
+# 本地配置(含生产 SSH/数据库明文凭据,切勿提交)
+config.json
+
+# 会话数据
+.zcode/
+
+# 备份文件
+*.bak
+*~

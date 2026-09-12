@@ -1,0 +1,289 @@
+@import "tailwindcss";
+
+/* VS Code 经典风格主题(Tailwind v4):语义 token + .dark 变体。
+   配色对齐 VS Code Dark / Light Modern(侧栏 #181818 / 编辑区 #1f1f1f / 分割线 #2b2b2b);
+   组件一律用语义工具类(bg-background/border-border/text-muted-foreground...),
+   亮暗两套取值集中在这里维护,禁止在组件里写死 zinc 色板。
+   布局密度对齐 VS Code 经典 UI:面板紧贴,仅以 1px 分割线(sash)相隔,全站零圆角。 */
+@custom-variant dark (&:is(.dark *));
+
+/* 零圆角:rounded-sm/md/... 走这里的 radius token(统一清零);
+   裸 rounded 是字面量工具类不走 token,单独压平。两层兜底保证全站无圆角 */
+@theme {
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
+}
+.rounded { border-radius: 0px; }
+
+:root {
+  /* VS Code Light Modern */
+  --background: #f8f8f8;
+  --foreground: #3b3b3b;
+  --card: #ffffff;
+  --card-foreground: #3b3b3b;
+  --popover: #ffffff;
+  --popover-foreground: #3b3b3b;
+  --primary: #005fb8;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f2f2;
+  --secondary-foreground: #3b3b3b;
+  --muted: #f2f2f2;
+  --muted-foreground: #616161;
+  --accent: #e8e8e8;
+  --accent-foreground: #3b3b3b;
+  --destructive: #e51400;
+  --border: #e5e5e5;
+  --input: #cecece;
+  --ring: #005fb8;
+}
+
+.dark {
+  /* VS Code Dark Modern */
+  --background: #181818;
+  --foreground: #cccccc;
+  --card: #1f1f1f;
+  --card-foreground: #cccccc;
+  --popover: #1f1f1f;
+  --popover-foreground: #cccccc;
+  --primary: #0078d4;
+  --primary-foreground: #ffffff;
+  --secondary: #313131;
+  --secondary-foreground: #cccccc;
+  --muted: #2a2d2e;
+  --muted-foreground: #9d9d9d;
+  --accent: #2a2d2e;
+  --accent-foreground: #cccccc;
+  --destructive: #f14c4c;
+  --border: #2b2b2b;
+  --input: #313131;
+  --ring: #0078d4;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+html, body, #root { height: 100%; }
+body { margin: 0; background: var(--background); }
+
+/* Monaco 装饰:断点圆点 / 停站行 */
+.bp-dot {
+  cursor: pointer;
+  background: radial-gradient(circle, #ef4444 0 42%, transparent 46%);
+  background-size: 60%;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+.cur-arrow {
+  cursor: pointer;
+  background:
+    linear-gradient(to bottom right, transparent 50%, #eab308 50%) 0 0 / 50% 50% no-repeat,
+    linear-gradient(to top right, transparent 50%, #eab308 50%) 0 100% / 50% 50% no-repeat,
+    #eab308 0 50% / 100% 2px no-repeat;
+  background-size: 70% 70%, 70% 70%, 100% 2px;
+  background-position: 15% center, 15% center, 0 center;
+  background-repeat: no-repeat;
+}
+.cur-line-hl {
+  background: rgba(234, 179, 8, 0.12);
+}
+/* 停站行同时有断点:两个 glyph 类合在同一元素上,cur-arrow 的 background 简写
+   会整体覆盖 bp-dot 的红色渐变导致红点消失;这里把红点作为最上层叠加在黄箭头右侧 */
+.bp-dot.cur-arrow {
+  background:
+    radial-gradient(circle, #ef4444 0 42%, transparent 46%) 72% center / 62% 62% no-repeat,
+    linear-gradient(to bottom right, transparent 50%, #eab308 50%) 15% center / 70% 70% no-repeat,
+    linear-gradient(to top right, transparent 50%, #eab308 50%) 15% center / 70% 70% no-repeat,
+    linear-gradient(#eab308, #eab308) 0 center / 100% 2px no-repeat;
+}
+
+/* 全局滚动条:VS Code 式方形半透明 thumb,亮暗两套 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.dark {
+  --scrollbar-thumb: rgba(121, 121, 121, 0.4);
+  --scrollbar-thumb-hover: rgba(121, 121, 121, 0.7);
+}
+:root:not(.dark) {
+  --scrollbar-thumb: rgba(100, 100, 100, 0.4);
+  --scrollbar-thumb-hover: rgba(100, 100, 100, 0.7);
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb, rgba(121, 121, 121, 0.4));
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover, rgba(121, 121, 121, 0.7));
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 面板分割条(VS Code sash):常显 1px 分割线把相邻面板连成整体,
+   悬停/拖拽时变主色加粗提示可抓取 */
+.col-resizer {
+  cursor: col-resize;
+  flex: 0 0 5px;
+  background: linear-gradient(var(--border), var(--border)) center / 1px 100% no-repeat;
+}
+.col-resizer:hover,
+.col-resizer.dragging {
+  background: linear-gradient(var(--ring), var(--ring)) center / 2px 100% no-repeat;
+}
+.row-resizer {
+  cursor: row-resize;
+  flex: 0 0 5px;
+  background: linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat;
+}
+.row-resizer:hover,
+.row-resizer.dragging {
+  background: linear-gradient(var(--ring), var(--ring)) center / 100% 2px no-repeat;
+}
+
+/* ── 可编辑表格单元格控件(对齐 TbmLite 的 Excel 风格) ──
+   控件完全嵌入单元格:透明背景、无边框、无阴影、填满格宽;网格线由 TableCell 的 border 承担。
+   单元格加 p-0 focus-within:ring-1 给出"正在编辑这一格"的提示。 */
+.cell-input {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  padding: 0.25rem 0.5rem;
+  font: inherit;
+  color: inherit;
+}
+.cell-input:focus,
+.cell-input:focus-visible {
+  outline: none;
+  border: 0;
+  box-shadow: none;
+}
+.cell-input::placeholder {
+  color: var(--muted-foreground);
+}
+
+/* 格内嵌 shadcn 下拉:触发器与网格融为一体(透明无边框填满格子),弹层仍由 shadcn 渲染 */
+.cell-select-trigger {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0.25rem 0.5rem;
+  font: inherit;
+  color: inherit;
+}
+.cell-select-trigger:hover,
+.cell-select-trigger[data-state='open'] {
+  background: transparent;
+}
+.cell-select-trigger:focus-visible,
+.cell-select-trigger[data-state='open'] {
+  outline: none;
+  border: 0;
+  box-shadow: none;
+}
+.cell-select-trigger[data-size='default'],
+.cell-select-trigger[data-size='sm'] {
+  height: 100%;
+}
+
+/* 活动页签(VS Code 签名样式):与编辑区同底色融入下方 + 顶部主色细线 */
+.tab-active {
+  box-shadow: inset 0 1px 0 0 var(--primary);
+}
+
+/* Ctrl+悬停函数链接样式(类 VS Code):蓝字+下划线+手形光标 */
+.fn-link {
+  color: #005fb8 !important;
+  text-decoration: underline !important;
+  cursor: pointer !important;
+}
+.dark .fn-link {
+  color: #4daafc !important;
+}
+
+/* 变量悬浮卡片(Monaco content widget):直接显示值(无头部/变量名/分割线)。
+   自适应宽度(max-content):短值卡片收窄(复制按钮近在眼前),长值封顶换行 */
+.fgl-hover {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  width: max-content;
+  min-width: 140px;
+  max-width: min(560px, calc(100vw - 24px));
+  font-size: 12px;
+  user-select: text;
+  cursor: default;
+}
+.fgl-hover-body {
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px 10px;
+}
+.fgl-hover-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 4px;
+  color: var(--muted-foreground);
+  background: var(--card);
+  border: 1px solid var(--border);
+  opacity: 0; /* 悬停卡片才浮现,平时不打扰值展示 */
+  transition: opacity 0.12s;
+}
+.fgl-hover:hover .fgl-hover-copy {
+  opacity: 1;
+}
+.fgl-hover-copy:hover:not(:disabled) {
+  color: var(--foreground);
+  background: var(--accent);
+}
+.fgl-hover-copy:disabled {
+  visibility: hidden; /* 错误态无值可复制,连同悬停也不显示 */
+}
+.fgl-hover-value {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
