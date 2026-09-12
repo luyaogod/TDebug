@@ -48,6 +48,9 @@ type WSLogItem struct {
 type WSLogContent struct {
 	Request  string `json:"request"`
 	Response string `json:"response"`
+	// RequestPartial 请求报文内容不完整(超过读取上限被截断,或源文件已清理只剩入库前 2000 字符)。
+	// 按原文件重放不受影响,但**基于该内容编辑后重放会送出残缺报文**,故界面据此禁用"用修改后的入参重放"。
+	RequestPartial bool `json:"requestPartial,omitempty"`
 }
 
 // reRowid 行标识白名单(拼 SQL 防注入):Oracle rowid / 金仓 ctid「(页,元组)」
@@ -262,29 +265,36 @@ from wsfa_t wsfa where rowid='%s';`, sqlWSLogCols(false), rowid)
 	//    两个文件共用一个 SFTP 通道并发读:此前是"每文件各开一次 SFTP 子通道 + 串行",
 	//    每次都要一次子系统握手;pkg/sftp 的 Client 明确支持多 goroutine 并发(内部请求 id 多路复用),
 	//    但不可与 Close 并发,故先 Wait 再 Close。
-	readFile := func(s *sftp.Client, path string) string {
+	//    返回值第二个布尔 = 是否被 262144 上限截断(界面要据此禁用"改后重放")。
+	readFile := func(s *sftp.Client, path string) (string, bool) {
 		if path == "" {
-			return ""
+			return "", false
 		}
 		f, e := s.Open(path)
 		if e != nil {
-			return ""
+			return "", false
 		}
 		defer f.Close()
+		var size int64 = -1
+		if st, e := f.Stat(); e == nil {
+			size = st.Size()
+		}
 		buf := make([]byte, 262144)
 		n, _ := f.Read(buf) // File.Read 内部会循环填满缓冲区(或到 EOF),无需自己重试
-		return string(buf[:n])
+		return string(buf[:n]), size > int64(n)
 	}
+	var reqTrunc, rspTrunc bool
 	if item.ReqPath != "" || item.RspPath != "" {
 		if s, e := conn.SFTP(); e == nil {
 			var wg sync.WaitGroup
 			wg.Add(2)
-			go func() { defer wg.Done(); content.Request = readFile(s, item.ReqPath) }()
-			go func() { defer wg.Done(); content.Response = readFile(s, item.RspPath) }()
+			go func() { defer wg.Done(); content.Request, reqTrunc = readFile(s, item.ReqPath) }()
+			go func() { defer wg.Done(); content.Response, rspTrunc = readFile(s, item.RspPath) }()
 			wg.Wait()
 			s.Close()
 		}
 	}
+	_ = rspTrunc
 
 	// 2) 文件已被清理 → 回退 CLOB(Oracle 用 dbms_lob.substr 分段规避 ORA-06502;
 	//    金仓 text 列直接 substr,ksql 原样输出)
@@ -332,6 +342,7 @@ select dbms_lob.substr(wsfa011,2000,1) from wsfa_t where rowid='%s' and wsfa011 
 		}
 		if content.Request == "" && len(reqLines) > 0 {
 			content.Request = strings.Join(reqLines, "\n") + "\n(仅显示前 2000 字符,源文件已被清理)"
+			reqTrunc = true // CLOB 回退只取前 2000 字符:内容本身就是残缺的
 		}
 		if content.Response == "" && len(rspLines) > 0 {
 			content.Response = strings.Join(rspLines, "\n") + "\n(仅显示前 2000 字符,源文件已被清理)"
@@ -340,28 +351,41 @@ select dbms_lob.substr(wsfa011,2000,1) from wsfa_t where rowid='%s' and wsfa011 
 
 	if content.Request == "" && content.Response == "" {
 		content.Request = "(报文已被清理:超过入库大小上限且源文件已不存在)"
+		reqTrunc = true // 占位文本不是可用入参
 	}
+	content.RequestPartial = reqTrunc
 	return item, content, nil
+}
+
+// maxReplayPayload 界面回传的入参上限(与接口测试同一量级;防止误把大文件塞进 argv 文件)
+const maxReplayPayload = 256 * 1024
+
+// checkReplayOverride 校验界面回传的"改过的入参":空表示用原报文;超限直接拒绝
+func checkReplayOverride(s string) error {
+	if s == "" {
+		return nil
+	}
+	if len(s) > maxReplayPayload {
+		return fmt.Errorf("入参 %d 字节,超过 %dKB 上限,拒绝重放", len(s), maxReplayPayload/1024)
+	}
+	return nil
 }
 
 // WriteReplayFiles 报文文件不存在时,把 CLOB 内容写到服务器临时文件供重放。
 // 返回可用的 (reqPath, rspPath, error);路径来自日志记录或新生成的临时文件。
-func WriteReplayFiles(conn *host.SSHConn, item *WSLogItem, content *WSLogContent) (reqPath, rspPath string, err error) {
+// reqOverride 非空 = 界面里改过的入参:无条件落临时文件并优先使用
+// (**不能走 ensure 的"原文件还在就用原文件"分支**,否则用户的修改会被静默忽略)。
+func WriteReplayFiles(conn *host.SSHConn, item *WSLogItem, content *WSLogContent, reqOverride string) (reqPath, rspPath string, err error) {
+	if err := checkReplayOverride(reqOverride); err != nil {
+		return "", "", err
+	}
 	sftp, err := conn.SFTP()
 	if err != nil {
 		return "", "", err
 	}
-	ensure := func(path, text string) (string, error) {
-		if path != "" {
-			if f, e := sftp.Open(path); e == nil {
-				f.Close()
-				return path, nil // 文件还在
-			}
-		}
-		if text == "" {
-			return "", nil
-		}
-		// CLOB 落到服务器 $TEMPDIR(aws 报文同目录规则)
+	defer sftp.Close()
+	// 内容落 $TEMPDIR(aws 报文同目录规则)
+	writeTemp := func(text string) (string, error) {
 		out, e := conn.Output("bash -lc 'echo $TEMPDIR'", 10*time.Second)
 		tmp := strings.TrimSpace(out)
 		if e != nil || tmp == "" {
@@ -378,7 +402,23 @@ func WriteReplayFiles(conn *host.SSHConn, item *WSLogItem, content *WSLogContent
 		}
 		return np, nil
 	}
-	if reqPath, err = ensure(item.ReqPath, content.Request); err != nil {
+	ensure := func(path, text string) (string, error) {
+		if path != "" {
+			if f, e := sftp.Open(path); e == nil {
+				f.Close()
+				return path, nil // 文件还在
+			}
+		}
+		if text == "" {
+			return "", nil
+		}
+		return writeTemp(text)
+	}
+	if reqOverride != "" {
+		if reqPath, err = writeTemp(reqOverride); err != nil {
+			return "", "", err
+		}
+	} else if reqPath, err = ensure(item.ReqPath, content.Request); err != nil {
 		return "", "", err
 	}
 	if rspPath, err = ensure(item.RspPath, content.Response); err != nil {

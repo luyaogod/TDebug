@@ -149,6 +149,44 @@ export function attachHover(editor: monaco.editor.IStandaloneCodeEditor) {
   })
 
   const render = (d: { v?: string; e?: string }) => root.render(<HoverCard {...d} />)
+  // 卡片尺寸/位置夹紧:悬浮卡片是 Monaco content widget,编辑器里有两层比它高——
+  // 右侧 minimap(z-index 5)与左侧行号槽,卡片伸过去就会被盖住/裁掉;窗口一小就必现。
+  // 这里把卡片夹在"正文区(去掉行号槽)∩ 编辑器可视区(去掉 minimap)"里,只动
+  // max-width 与外边距,不碰 Monaco 的 left/top(滚动跟随、鼠标移向卡片等行为都不变):
+  //   1) 限宽:窄屏时卡片自己换行(body 自带 max-height 内部滚动),左右都不越界;
+  //   2) 超右往左推、超下往上收,推的最左只到正文区左缘(不再压到行号上)。
+  const CARD_PAD = 8
+  const clampCard = () => {
+    if (!visible) return
+    const node = editor.getDomNode()
+    // 注意:dom 是交给 Monaco 的挂载节点,React 把卡片渲染成它的子元素(.fgl-hover)——
+    // 夹紧必须作用在卡片本身,否则 max-width 会被卡片自己的样式盖过(外层限不住内层)。
+    const card = dom.querySelector('.fgl-hover') as HTMLElement | null
+    if (!node || !card) return
+    const layout = editor.getLayoutInfo()
+    // 编辑器内坐标:右边界取 minimap 左缘(没开 minimap 则取编辑器右缘);左边界取正文区左缘
+    const rightEdge = layout.minimap.minimapWidth > 0 ? layout.minimap.minimapLeft : layout.width
+    const leftEdge = layout.contentLeft
+    card.style.maxWidth = `${Math.min(560, Math.max(140, rightEdge - leftEdge - CARD_PAD))}px`
+    const body = card.querySelector('.fgl-hover-body') as HTMLElement | null
+    // 卡片自身高度也受编辑器高度约束(否则短窗口会把上/下顶出可视区)
+    if (body) body.style.maxHeight = `${Math.max(96, layout.height - CARD_PAD * 2 - 24)}px`
+    card.style.marginLeft = '0px'
+    card.style.marginTop = '0px'
+    const r = card.getBoundingClientRect()
+    const nr = node.getBoundingClientRect()
+    const dRight = r.right - (nr.left + rightEdge - CARD_PAD)
+    // 往左最多推到正文区左缘(留 pad):再往左就压到行号槽上了
+    const maxShift = Math.max(0, r.left - (nr.left + leftEdge + CARD_PAD))
+    if (dRight > 0 && maxShift > 0) card.style.marginLeft = `-${Math.round(Math.min(dRight, maxShift))}px`
+    const dBottom = r.bottom - (nr.top + layout.height - CARD_PAD)
+    if (dBottom > 0) card.style.marginTop = `-${Math.round(Math.min(dBottom, r.top - (nr.top + CARD_PAD)))}px`
+  }
+  // 窗口/面板尺寸变化(编辑器 layout 变化)后重新夹紧
+  editor.onDidLayoutChange(() => clampCard())
+  // 卡片是 React 渲染进 dom 的子元素,提交时机不固定(可能在首帧之后),所以再挂个
+  // ResizeObserver:卡片一出现/换行导致尺寸变化就重新夹紧(幂等,尺寸稳定后不再触发)
+  new ResizeObserver(() => clampCard()).observe(dom)
   // 真正弹卡:只在拿到求值结果后调用
   const present = (expr: string, pos: monaco.Position, data: { v?: string; e?: string }) => {
     wpos = { line: pos.lineNumber, column: pos.column }
@@ -157,6 +195,7 @@ export function attachHover(editor: monaco.editor.IStandaloneCodeEditor) {
     visible = true
     render({ v: data.v, e: data.e })
     editor.layoutContentWidget(widget)
+    requestAnimationFrame(clampCard)
   }
   // 驻留到期:缓存命中直接弹卡;否则先静默求值,拿到结果才弹——
   // No symbol(非变量)永不弹卡,其余错误以错误态弹出

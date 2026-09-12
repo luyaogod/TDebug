@@ -13,14 +13,14 @@ import { StatusBar } from './StatusBar'
 import { api } from './api'
 
 // VS Code 风格活动栏图标按钮:通栏占满活动栏宽度(悬停/选中底色左右贴边,无留白差),
-// 选中态灰色底色(无左侧蓝条),未选中透明显灰
+// 选中态灰色底色(无左侧蓝条),未选中悬停给半档底色(与手风琴表头一致的 hover 反馈)
 function ActivityIcon({ icon: Icon, label, active, onClick }: {
   icon: LucideIcon; label: string; active: boolean; onClick: () => void
 }) {
   return (
     <button title={label} onClick={onClick}
       className={`flex h-8 w-full shrink-0 items-center justify-center transition-colors ${
-        active ? 'bg-foreground/10 text-foreground' : 'text-muted-foreground hover:text-foreground'
+        active ? 'bg-foreground/10 text-foreground' : 'text-muted-foreground hover:bg-foreground/5 hover:text-foreground'
       }`}>
       <Icon className="h-5 w-5" />
     </button>

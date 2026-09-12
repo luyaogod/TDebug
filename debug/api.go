@@ -943,12 +943,19 @@ func (s *Server) hWSLogContent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "item": item, "content": content})
 }
 
-// hWSLogDebug POST /api/wslogs/debug {rowid} → 用该日志的报文重放调试
+// hWSLogDebug POST /api/wslogs/debug {rowid, request?} → 用该日志的报文重放调试。
+// request 非空 = 界面里改过的入参(落服务器临时文件后作为入参文件),空 = 用日志原报文。
 func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RowID string `json:"rowid"`
+		RowID   string `json:"rowid"`
+		Request string `json:"request"`
 	}
 	if !readBody(w, r, &req) {
+		return
+	}
+	// 入参先校验:非法请求不该先把当前会话收口(旧顺序是收口后才在 LaunchReplay 里失败)
+	if err := checkReplayOverride(req.Request); err != nil {
+		fail(w, 400, err)
 		return
 	}
 	conn, err := host.Dial(s.cfg.SSH)
@@ -981,7 +988,7 @@ func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 			s.mgr.Remove(cur.ID)
 		}
 	}
-	sess, err := s.mgr.LaunchReplay(item, content)
+	sess, err := s.mgr.LaunchReplay(item, content, req.Request)
 	if err != nil {
 		fail(w, 409, err)
 		return

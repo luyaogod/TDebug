@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "check:tokens": "esbuild scripts/fgltokens.test.mjs --bundle --format=esm --platform=node --external:monaco-editor/* --outfile=scripts/.tmp-tokens.mjs && node scripts/.tmp-tokens.mjs",
-    "check:outline": "esbuild scripts/fgloutline.fixtures.mjs --bundle --format=esm --platform=node --outfile=scripts/.tmp-outline.mjs && node scripts/.tmp-outline.mjs"
+    "check:outline": "esbuild scripts/fgloutline.fixtures.mjs --bundle --format=esm --platform=node --outfile=scripts/.tmp-outline.mjs && node scripts/.tmp-outline.mjs",
+    "check:store": "esbuild scripts/store.test.mjs --bundle --format=esm --platform=node --outfile=scripts/.tmp-store.mjs && node scripts/.tmp-store.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

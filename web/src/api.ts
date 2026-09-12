@@ -26,6 +26,9 @@ export interface WSLogItem {
 }
 export interface WSLogContent {
   request: string; response: string
+  // 请求报文内容不完整(超读取上限被截断 / 源文件已清理只剩前 2000 字符):
+  // 按原报文重放不受影响,但不能基于它编辑后重放(会送出残缺报文)
+  requestPartial?: boolean
 }
 // 接口日志查询条件(对齐 T100 原生页 awsq990 的 QBE):
 // startFrom = wsfa003(起始时间)下界,endTo = wsfa004(结束时间)上界;
@@ -43,24 +46,6 @@ export interface WSLogQuery {
 
 export interface WSTestResult {
   httpCode: number; durationSec: number; response: string; error?: string
-}
-
-// HTTP 状态码 → 原因短语(服务测试的「运行结果」列)。
-// 原生 awsq990 取的是 com.HTTPResponse.getStatusDescription()(服务器返回的短语);
-// curl 只给数字码,故按标准原因短语映射 —— 标准码结果与原生一致,未命中的码回落 HTTP <code>。
-const HTTP_STATUS_TEXT: Record<number, string> = {
-  200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
-  301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified',
-  400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found',
-  405: 'Method Not Allowed', 406: 'Not Acceptable', 408: 'Request Timeout',
-  409: 'Conflict', 415: 'Unsupported Media Type', 429: 'Too Many Requests',
-  500: 'Internal Server Error', 501: 'Not Implemented', 502: 'Bad Gateway',
-  503: 'Service Unavailable', 504: 'Gateway Timeout',
-}
-
-export function httpStatusText(code: number, err?: string): string {
-  if (code > 0) return HTTP_STATUS_TEXT[code] ?? `HTTP ${code}`
-  return err ? err : '无响应'
 }
 
 export interface Event {
@@ -144,8 +129,12 @@ export const api = {
   },
   wsLogContent: (rowid: string) =>
     req<{ item: WSLogItem; content: WSLogContent }>(`/api/wslogs/content?rowid=${encodeURIComponent(rowid)}`),
-  wsLogDebug: (rowid: string) =>
-    req<{ sessionId: string; module?: string; prog?: string; runProg?: string }>('/api/wslogs/debug', { method: 'POST', body: JSON.stringify({ rowid }) }),
+  // 重放调试:request 非空 = 用界面里改过的入参(后端落临时文件后作为入参文件)
+  wsLogDebug: (rowid: string, request?: string) =>
+    req<{ sessionId: string; module?: string; prog?: string; runProg?: string }>('/api/wslogs/debug', {
+      method: 'POST',
+      body: JSON.stringify(request ? { rowid, request } : { rowid }),
+    }),
   sourcePreview: (module: string, prog: string) =>
     req<{ source: { path: string; content: string; dvmFile?: string } }>(`/api/source-preview?module=${encodeURIComponent(module)}&prog=${encodeURIComponent(prog)}`),
 }

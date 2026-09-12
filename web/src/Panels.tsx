@@ -4,9 +4,11 @@ import * as AccordionPrimitive from '@radix-ui/react-accordion'
 import { useEffect, useRef, useState } from 'react'
 import { Eye, EyeOff, Play, Ruler } from 'lucide-react'
 import { useStore } from './store'
+import type { Breakpoint } from './api'
 import { Badge, Checkbox, Input } from './ui'
 import { parseFglTree, type TNode } from './fglparse'
 import { VarTreeNodes } from './VarTreeUi'
+import { progKey } from './fglPath'
 
 // 运行/调试区(VS Code Run and Debug 同款):绿色运行按钮 + 目标输入框。
 // 输入作业编号或程序名(模块自动解析);也支持「模块/作业」显式指定模块。
@@ -109,13 +111,15 @@ const AccordionContent = React.forwardRef<
 ))
 AccordionContent.displayName = 'AccordionContent'
 
-// 面板头行:左侧固定位(自动开关或等宽占位),右侧手风琴触发区(整块点击开合)
+// 面板头行:左侧固定位(自动开关或等宽占位),右侧手风琴触发区(整块点击开合)。
+// hover 底色挂在整行上(:hover 对父级同样生效),这样左侧图标位与右侧 chevron 一起变色;
+// 若各自挂 hover:bg,悬停哪块就只亮哪块,图标位会留出一条不同底色的断口,很别扭。
 function PanelHeader({ leading, children }: { leading?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="flex h-8 shrink-0 items-stretch">
+    <div className="group flex h-8 shrink-0 items-stretch transition-colors hover:bg-accent/50">
       {leading}
       <AccordionPrimitive.Trigger
-        className="flex h-full min-w-0 flex-1 items-center justify-between gap-2 pr-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground [&[data-state=open]>svg]:rotate-180"
+        className="flex h-full min-w-0 flex-1 items-center justify-between gap-2 pr-2.5 text-xs font-medium text-muted-foreground transition-colors group-hover:text-foreground [&[data-state=open]>svg]:rotate-180"
       >
         <span className="min-w-0 flex-1 truncate pl-1">{children}</span>
         <svg
@@ -149,8 +153,8 @@ function AutoSwitch({ on, onToggle, onTip, offTip }: {
       title={on ? onTip : offTip}
       aria-pressed={on}
       onClick={onToggle}
-      className={`flex w-6 shrink-0 items-center justify-center transition-colors hover:bg-accent/50 ${
-        on ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground hover:text-foreground'
+      className={`flex w-6 shrink-0 items-center justify-center transition-colors ${
+        on ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground group-hover:text-foreground'
       }`}
     >
       <Icon className="h-3.5 w-3.5" />
@@ -377,29 +381,45 @@ function BpsBody() {
   const removeBreakpoint = useStore((s) => s.removeBreakpoint)
   const toggleBPEnabled = useStore((s) => s.toggleBPEnabled)
   const jumpToBp = useStore((s) => s.jumpToBp)
+  // 当前停站位置:用来标出"正停在这个断点上"。用与编辑器停站行同一个黄色(黄=停站行),
+  // 一眼就能把列表条目和源码里那条高亮对上;不在停站态/文件或行号不匹配就不标。
+  const stop = useStore((s) => s.stop)
+  const stopped = useStore((s) => s.state === 'stopped')
+  const module = useStore((s) => s.module)
+  const atStop = (b: Breakpoint) =>
+    stopped && !!stop?.file && !!b.file && b.line === stop.line &&
+    progKey(b.file, module) === progKey(stop.file, module)
   if (breakpoints.length === 0) return null
   return (
     <div>
-      {breakpoints.map((b) => (
-        <div key={b.num} className={`flex items-center gap-2 border-b border-border/60 px-2 py-1 text-xs ${b.enabled ? '' : 'opacity-50'}`}>
-          <Checkbox
-            checked={b.enabled}
-            onCheckedChange={(v) => void toggleBPEnabled(b.num, v === true)}
-            className="cursor-pointer"
-            title={b.enabled ? '取消勾选禁用断点' : '勾选启用断点'}
-          />
-          <span
-            className="min-w-0 flex-1 cursor-pointer truncate text-foreground hover:text-sky-700 dark:hover:text-sky-300 hover:underline"
-            title={`跳转到 ${b.file}:${b.line}`}
-            onClick={() => void jumpToBp(b)}
-          >
-            {b.func ? <span className="text-sky-600 dark:text-sky-400">{b.func} </span> : null}
-            {b.file}:{b.line}
-            {!b.enabled && <span className="ml-1 text-[10px] text-muted-foreground">(已禁用)</span>}
-          </span>
-          <button className="text-muted-foreground hover:text-red-600 dark:hover:text-red-400" onClick={() => void removeBreakpoint(b.num)}>×</button>
-        </div>
-      ))}
+      {breakpoints.map((b) => {
+        const hit = atStop(b)
+        return (
+          <div key={b.num}
+            title={hit ? `当前停在此断点:${b.file}:${b.line}` : undefined}
+            className={`relative flex items-center gap-2 border-b border-border/60 px-2 py-1 text-xs ${
+              b.enabled ? '' : 'opacity-50'} ${hit ? 'bg-yellow-500/15' : ''}`}>
+            {/* 左侧 2px 黄条:绝定位,不给该行引入布局位移(列表行不会错位) */}
+            {hit && <span className="absolute inset-y-0 left-0 w-0.5 bg-yellow-500" aria-hidden />}
+            <Checkbox
+              checked={b.enabled}
+              onCheckedChange={(v) => void toggleBPEnabled(b.num, v === true)}
+              className="cursor-pointer"
+              title={b.enabled ? '取消勾选禁用断点' : '勾选启用断点'}
+            />
+            <span
+              className="min-w-0 flex-1 cursor-pointer truncate text-foreground hover:text-sky-700 dark:hover:text-sky-300 hover:underline"
+              title={`跳转到 ${b.file}:${b.line}`}
+              onClick={() => void jumpToBp(b)}
+            >
+              {b.func ? <span className="text-sky-600 dark:text-sky-400">{b.func} </span> : null}
+              {b.file}:{b.line}
+              {!b.enabled && <span className="ml-1 text-[10px] text-muted-foreground">(已禁用)</span>}
+            </span>
+            <button className="text-muted-foreground hover:text-red-600 dark:hover:text-red-400" onClick={() => void removeBreakpoint(b.num)}>×</button>
+          </div>
+        )
+      })}
     </div>
   )
 }

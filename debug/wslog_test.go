@@ -107,6 +107,25 @@ func TestWSLogWhereBadTime(t *testing.T) {
 	}
 }
 
+// 界面回传的"改过的入参"校验:空 = 用原报文(放行);超上限拒绝
+func TestCheckReplayOverride(t *testing.T) {
+	if err := checkReplayOverride(""); err != nil {
+		t.Fatalf("空入参表示用原报文,不该报错: %v", err)
+	}
+	ok := strings.Repeat("x", maxReplayPayload)
+	if err := checkReplayOverride(ok); err != nil {
+		t.Fatalf("%d 字节(正好上限)应放行: %v", len(ok), err)
+	}
+	over := strings.Repeat("x", maxReplayPayload+1)
+	err := checkReplayOverride(over)
+	if err == nil {
+		t.Fatalf("%d 字节(超一字节)应被拒绝", len(over))
+	}
+	if !strings.Contains(err.Error(), "256KB") {
+		t.Errorf("错误信息应点明上限,实际: %v", err)
+	}
+}
+
 // 每页条数/页码的钳位:非法值回落到默认,不因调用方传参崩掉
 func TestWSLogPageClamp(t *testing.T) {
 	// 只验证钳位分支本身(不触网):越界值与默认值的期望

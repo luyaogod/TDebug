@@ -1,76 +1,19 @@
 // 源码视图:VS Code 式多页签 = 调试页(锁定第一个,跟随停站)+ 浏览页(Ctrl+点击函数等静态打开)
 // 单 Editor 实例,path 切换复用/重建 monaco model(@monaco-editor/react 自动保存恢复视口)
 import { useEffect, useMemo, useRef, useState } from 'react'
-import Editor, { loader, type OnMount } from '@monaco-editor/react'
+import Editor, { type OnMount } from '@monaco-editor/react'
 import { Bug, Loader2, X } from 'lucide-react'
 import * as monaco from 'monaco-editor'
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
-// codicon 图标映射表:ESM 用法要求宿主显式引入,否则 Ctrl+F 查找控件等只有空按钮
-import 'monaco-editor/esm/vs/base/browser/ui/codicons/codiconStyles.js'
 import { useStore } from './store'
 import { cn } from './lib/utils'
 import { attachHover } from './fglHover'
-import { FGL_MONARCH } from './fglTokens'
+import { setupMonaco, monacoThemeName } from './monacoSetup'
+import { progKey } from './fglPath'
 
 export const editorRef = { current: null as monaco.editor.IStandaloneCodeEditor | null }
 
-let registered = false
-function setupMonaco() {
-  if (registered) return
-  registered = true
-  self.MonacoEnvironment = { getWorker: () => new editorWorker() }
-  loader.config({ monaco })
-  monaco.languages.register({ id: '4gl' })
-  // 4GL 高亮定义移植自 BDL 扩展(见 fglTokens.ts):只发 comment/string/keyword 三类 token
-  monaco.languages.setMonarchTokensProvider('4gl', FGL_MONARCH)
-  monaco.editor.defineTheme('tdebug-dark', {
-    base: 'vs-dark',
-    inherit: true,
-    // 语法配色对齐 VS Code Dark Modern 默认主题;只列三类,与 tokenizer 一一对应
-    // (数字/标识符/括号改为继承主题默认前景色,类型关键字并入 keyword 蓝)
-    rules: [
-      { token: 'keyword', foreground: '569cd6' },
-      { token: 'comment', foreground: '6a9955' },
-      { token: 'string', foreground: 'ce9178' },
-    ],
-    colors: {
-      'editor.background': '#1f1f1f',
-      // 滚动条适配暗色(VS Code 半透明方形滑块)
-      'scrollbarSlider.background': '#79797966',
-      'scrollbarSlider.hoverBackground': '#797979b3',
-      'scrollbarSlider.activeBackground': '#797979b3',
-    },
-  })
-  monaco.editor.defineTheme('tdebug-light', {
-    base: 'vs',
-    inherit: true,
-    // 语法配色对齐 VS Code Light Modern 默认主题
-    rules: [
-      { token: 'keyword', foreground: '0000ff' },
-      { token: 'comment', foreground: '008000' },
-      { token: 'string', foreground: 'a31515' },
-    ],
-    colors: {
-      'editor.background': '#ffffff',
-      'scrollbarSlider.background': '#64646466',
-      'scrollbarSlider.hoverBackground': '#646464b3',
-      'scrollbarSlider.activeBackground': '#646464b3',
-    },
-  })
-}
-
-// 模块加载时立即配置(必须先于 Editor 挂载,否则 loader 可能走 CDN 导致主题/渲染不稳)
+// Monaco 初始化(语言/主题/worker)在 monacoSetup.ts:与报文编辑器共用,模块加载时立即配置
 setupMonaco()
-
-// 归一化出可比的程序主名:去路径、去 .4gl、去模块前缀。
-// fgldb 报的断点文件是 `bsft001_wf.4gl`(或全路径),而 sourceDVM 可能是
-// `${模块}_${程序}.4gl`(启动预取)——严格比较会漏画,红点要停站一次才出现
-function progKey(f: string, module?: string): string {
-  let b = f.split(/[\\/]/).pop() || f
-  b = b.replace(/\.4gl$/i, '')
-  if (module && b.toLowerCase().startsWith(module.toLowerCase() + '_')) b = b.slice(module.length + 1)
-  return b.toLowerCase()
-}
 
 export function SourceView() {
   // 调试页数据
@@ -83,6 +26,7 @@ export function SourceView() {
   const module = useStore((s) => s.module)
   const theme = useStore((s) => s.theme)
   const loadingSource = useStore((s) => s.loadingSource)
+  const replayRowid = useStore((s) => s.lastReplayRowid)
   const prog = useStore((s) => s.prog)
   // 页签
   const tabs = useStore((s) => s.tabs)
@@ -226,11 +170,12 @@ export function SourceView() {
   const revealSeq = useStore((s) => s.revealReq?.seq ?? 0)
   const revealLine = useStore((s) => s.revealReq?.line ?? 0)
   const revealKey = useStore((s) => s.revealReq?.key ?? '')
+  const revealNav = useStore((s) => s.revealReq?.nav ?? false) // 纯浏览跳转(断点列表):不停站也滚
   const revealedSeqRef = useRef(0)
   useEffect(() => {
     const targetKey = isDebug ? 'debug' : active?.key
     if (!(revealLine > 0) || revealKey !== targetKey) return
-    if (isDebug && state !== 'stopped') return
+    if (isDebug && state !== 'stopped' && !revealNav) return
     if (revealSeq === revealedSeqRef.current) return
     const t = setTimeout(() => {
       const ed = editorRef.current
@@ -240,7 +185,7 @@ export function SourceView() {
       ed.revealLineInCenterIfOutsideViewport(revealLine)
     }, 80)
     return () => clearTimeout(t)
-  }, [revealSeq, revealLine, revealKey, content, isDebug, state, active?.key])
+  }, [revealSeq, revealLine, revealKey, revealNav, content, isDebug, state, active?.key])
 
   // 编辑器 options 必须稳定:字面量每次渲染都是新对象,会触发 @monaco-editor/react
   // 反复 updateOptions(minimap 重建),加断点等重渲染时会把滚动位置复位
@@ -302,7 +247,7 @@ export function SourceView() {
       <div className="relative min-h-0 flex-1">
         <Editor
           language="4gl"
-          theme={theme === 'light' ? 'tdebug-light' : 'tdebug-dark'}
+          theme={monacoThemeName(theme)}
           path={modelPath}
           value={content}
           beforeMount={setupMonaco}
@@ -316,8 +261,14 @@ export function SourceView() {
         />
         {/* 调试页跨文件切换:旧文件保持显示但加遮罩,停站光标等源码到位再落位 */}
         {busy && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/40">
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-background/40">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            {/* 启动/重放期间说明在等什么(重放要先连服务器重读报文,秒级),别让人干看着转圈 */}
+            {isDebug && state === 'loading' && (
+              <div className="text-xs text-muted-foreground">
+                {replayRowid ? '正在按接口日志重放,准备调试会话…' : '正在启动调试会话…'}
+              </div>
+            )}
           </div>
         )}
         {/* 调试页:停站且确无源码时提示(启动/加载期间只显示转圈,不打扰) */}

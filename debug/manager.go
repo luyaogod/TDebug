@@ -282,7 +282,8 @@ func (m *Manager) resolveJobWith(cfg *Config, module, job string) (mod, prog, la
 // 作业取 wsfa012(gzja_t 服务→程序的解析结果),再走 gzzz_t 解析实体程序+模块;
 // 报文文件被清理时用 CLOB 内容落到服务器临时文件再重放。
 // 会话复用规则与普通启动一致:同目标空闲宿主直接复用。
-func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent) (*Session, error) {
+// LaunchReplay 用日志报文重放调试。reqOverride 非空 = 界面里改过的入参(落临时文件后作为 reqPath)。
+func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent, reqOverride string) (*Session, error) {
 	job := strings.TrimSpace(item.Job)
 	if job == "" {
 		return nil, fmt.Errorf("该日志没有关联作业编号(wsfa012 为空),无法重放")
@@ -298,7 +299,7 @@ func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent) (*Session
 		return nil, fmt.Errorf("SSH 连接失败: %w", err)
 	}
 	defer conn.Close()
-	reqPath, rspPath, err := WriteReplayFiles(conn, item, content)
+	reqPath, rspPath, err := WriteReplayFiles(conn, item, content, reqOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -317,6 +318,9 @@ func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent) (*Session
 	}
 	if runProg != "" && runProg != job {
 		sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放调试:作业 %s → 实体程序 %s(gzzz_t)", job, runProg)})
+	}
+	if reqOverride != "" {
+		sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放使用界面修改后的入参(%d 字节),已写入 %s", len(reqOverride), reqPath)})
 	}
 	sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放 %s:fglrun -d %s %s", item.Service, runProgOr(job, runProg), args)})
 	return sess, nil

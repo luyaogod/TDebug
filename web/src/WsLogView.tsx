@@ -3,10 +3,11 @@
 // 此时列表收起为「状态 + 服务」两列给面板让位 —— 详情面板可拖拽分配宽度,也可主动关闭(✕ / Esc)。
 // 查询条件对齐 awsq990 主查询 QBE:服务名(wsfa001)+ 开始时间范围(wsfa003);仅失败为本工具扩展
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bug, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, ChevronUp, Copy, RefreshCw, X } from 'lucide-react'
+import { Bug, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, ChevronUp, Copy, RefreshCw, Undo2, X } from 'lucide-react'
 import { useStore } from './store'
 import { Checkbox, DatePicker, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui'
 import type { WSLogItem } from './api'
+import { PayloadEditor } from './PayloadEditor'
 
 // 列表列定义:完整模式(未选中)与紧凑模式(详情展开,只留状态/服务)共用同一套渲染。
 // 每个列都给出排序键,表头点击即排序。注意:排序只作用于**当前页**——分页在后端做,
@@ -274,6 +275,14 @@ export function WsLogView() {
   }
   const onRowLeave = () => window.clearTimeout(prefetchTimer.current)
 
+  // ---- 入参编辑(重放用) ----
+  // reqDraft = 编辑器里的当前文本(草稿);与日志里的原始入参不一致即视为"改过",
+  // 重放时把草稿发给后端(后端落临时文件后作为入参文件),未改则走原报文。
+  // 换行/换报文时重置草稿,避免把上一行的修改带到下一行。
+  const [reqDraft, setReqDraft] = useState('')
+  useEffect(() => { setReqDraft(content?.request ?? '') }, [content?.request, sel?.rowid])
+  const reqDirty = !!content && reqDraft !== content.request
+
   // 未连接会话:没有可查的数据源,只给一句引导,不渲染工具条/列表/详情
   if (!hasSession) {
     return (
@@ -287,78 +296,85 @@ export function WsLogView() {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {/* 工具条:四个查询条件(服务名称/处理结果/发起端/服务端,对齐 awsq990 QBE)+ 时间范围 +
-          仅失败 + 刷新 + 翻页;下缘分割线与列表连成整体。窄了自动换行(flex-wrap)。 */}
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-2 py-1.5">
-        <input
-          value={draft.service}
-          onChange={(e) => setDraft((d) => ({ ...d, service: e.target.value }))}
-          onKeyDown={onEnter}
-          placeholder="服务名称(支持 * ? 通配,回车生效)"
-          title="服务名称 wsfa001:支持 * ? 通配,如 icd.erp.wo*;回车生效"
-          className={QUERY_INPUT}
-        />
-        <input
-          value={draft.server}
-          onChange={(e) => setDraft((d) => ({ ...d, server: e.target.value }))}
-          onKeyDown={onEnter}
-          placeholder="服务端(如 T100)"
-          title="服务端 wsfa018:等值匹配,如 T100;回车生效"
-          className={QUERY_INPUT_SM}
-        />
-        <input
-          value={draft.origin}
-          onChange={(e) => setDraft((d) => ({ ...d, origin: e.target.value }))}
-          onKeyDown={onEnter}
-          placeholder="发起端(如 OA)"
-          title="发起端 wsfa013:等值匹配,如 OA / Athena;回车生效"
-          className={QUERY_INPUT_SM}
-        />
-        <input
-          value={draft.result}
-          onChange={(e) => setDraft((d) => ({ ...d, result: e.target.value }))}
-          onKeyDown={onEnter}
-          placeholder="处理结果(如 000)"
-          title="处理结果 wsfa006:等值匹配,如 000 成功 / 100 失败;回车生效"
-          className={QUERY_INPUT_SM}
-        />
-        <div className="flex items-center gap-1 text-xs text-muted-foreground">
-          起始时间
-          <DatePicker value={from} onChange={setFrom} title="起始时间 wsfa003 的下界(含当天)" />
-          ~
-          结束时间
-          <DatePicker value={to} onChange={setTo} title="结束时间 wsfa004 的上界(含当天,补到 23:59:59.99999)" />
-        </div>
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Checkbox id="wslog-onlyfail" checked={onlyFail}
-            onCheckedChange={(v) => {
-              // 立即生效:显式传新值查询。原先靠 setTimeout(doLoad) 复用闭包里的旧 onlyFail,
-              // 首次勾选实际发的是旧值(勾上了但结果没变),这里一并修掉。
-              const on = v === true
-              setOnlyFail(on)
-              setApplied(draft)
-              void loadWsLogs({ ...draft, onlyFail: on, page: 1, startFrom: from, endTo: to })
-            }} />
-          <label htmlFor="wslog-onlyfail" className="cursor-pointer select-none">仅失败</label>
-        </div>
-        <button onClick={() => doLoad(1)} disabled={loading} title="按当前条件重新加载(回车等效)"
-          className="p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40">
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-        {/* 分页 */}
-        <div className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
-          <span>{wsLogs.length} 条</span>
-          <button onClick={() => doLoad(page - 1)} disabled={loading || page <= 1} title="上一页"
-            className="p-1 hover:bg-accent hover:text-foreground disabled:opacity-30">
-            <ChevronLeft className="h-4 w-4" />
-          </button>
-          <span className="whitespace-nowrap font-mono">第 {page} 页</span>
-          <button onClick={() => doLoad(page + 1)} disabled={loading || !hasMore} title="下一页"
-            className="p-1 hover:bg-accent hover:text-foreground disabled:opacity-30">
-            <ChevronRight className="h-4 w-4" />
+      {/* 工具条分两行(条件多,挤一行看不清):
+            第一行 = 四个查询条件(服务名称/服务端/发起端/处理结果,对齐 awsq990 QBE)+ 刷新;
+            第二行 = 时间范围 + 仅失败 + 条数/翻页(右对齐)。
+          下缘分割线与列表连成整体;窄了各自内部换行(flex-wrap)。
+          两行之间留出间距(pt/pb),否则输入框与日期行贴在一起显得挤。 */}
+      <div className="shrink-0 border-b border-border">
+        <div className="flex flex-wrap items-center gap-2 px-2 pt-2 pb-1.5">
+          <input
+            value={draft.service}
+            onChange={(e) => setDraft((d) => ({ ...d, service: e.target.value }))}
+            onKeyDown={onEnter}
+            placeholder="服务名称(支持 * ? 通配,回车生效)"
+            title="服务名称 wsfa001:支持 * ? 通配,如 icd.erp.wo*;回车生效"
+            className={QUERY_INPUT}
+          />
+          <input
+            value={draft.server}
+            onChange={(e) => setDraft((d) => ({ ...d, server: e.target.value }))}
+            onKeyDown={onEnter}
+            placeholder="服务端(如 T100)"
+            title="服务端 wsfa018:等值匹配,如 T100;回车生效"
+            className={QUERY_INPUT_SM}
+          />
+          <input
+            value={draft.origin}
+            onChange={(e) => setDraft((d) => ({ ...d, origin: e.target.value }))}
+            onKeyDown={onEnter}
+            placeholder="发起端(如 OA)"
+            title="发起端 wsfa013:等值匹配,如 OA / Athena;回车生效"
+            className={QUERY_INPUT_SM}
+          />
+          <input
+            value={draft.result}
+            onChange={(e) => setDraft((d) => ({ ...d, result: e.target.value }))}
+            onKeyDown={onEnter}
+            placeholder="处理结果(如 000)"
+            title="处理结果 wsfa006:等值匹配,如 000 成功 / 100 失败;回车生效"
+            className={QUERY_INPUT_SM}
+          />
+          <button onClick={() => doLoad(1)} disabled={loading} title="按当前条件重新加载(回车等效)"
+            className="p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40">
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
-        {sessionBusy && <span className="text-xs text-amber-600/80 dark:text-amber-500/80">调试会话忙碌中:重放将自动结束当前调试</span>}
+        <div className="flex flex-wrap items-center gap-2 px-2 pt-1.5 pb-2">
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            起始时间
+            <DatePicker value={from} onChange={setFrom} title="起始时间 wsfa003 的下界(含当天)" />
+            ~
+            结束时间
+            <DatePicker value={to} onChange={setTo} title="结束时间 wsfa004 的上界(含当天,补到 23:59:59.99999)" />
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Checkbox id="wslog-onlyfail" checked={onlyFail}
+              onCheckedChange={(v) => {
+                // 立即生效:显式传新值查询。原先靠 setTimeout(doLoad) 复用闭包里的旧 onlyFail,
+                // 首次勾选实际发的是旧值(勾上了但结果没变),这里一并修掉。
+                const on = v === true
+                setOnlyFail(on)
+                setApplied(draft)
+                void loadWsLogs({ ...draft, onlyFail: on, page: 1, startFrom: from, endTo: to })
+              }} />
+            <label htmlFor="wslog-onlyfail" className="cursor-pointer select-none">仅失败</label>
+          </div>
+          {sessionBusy && <span className="text-xs text-amber-600/80 dark:text-amber-500/80">调试会话忙碌中:重放将自动结束当前调试</span>}
+          {/* 分页 */}
+          <div className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+            <span>{wsLogs.length} 条</span>
+            <button onClick={() => doLoad(page - 1)} disabled={loading || page <= 1} title="上一页"
+              className="p-1 hover:bg-accent hover:text-foreground disabled:opacity-30">
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+            <span className="whitespace-nowrap font-mono">第 {page} 页</span>
+            <button onClick={() => doLoad(page + 1)} disabled={loading || !hasMore} title="下一页"
+              className="p-1 hover:bg-accent hover:text-foreground disabled:opacity-30">
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
       </div>
 
       {err && (
@@ -374,9 +390,13 @@ export function WsLogView() {
           <div className="min-h-0 flex-1 overflow-auto">
             {/* table-fixed:列宽交给表头/单元格上的 w-* ,留空的那列吃剩余宽度。
                 container=false 不套 shadcn Table 默认的 overflow-x-auto 容器(它会让 th 的
-                sticky 失效),滚动交给外层;表头下边框画在 th 上、背景也给 th,
-                否则滚动时边框会跟着内容滚走、行会从表头底下透出来。 */}
-            <Table container={false} className="table-fixed text-xs">
+                sticky 失效),滚动交给外层。
+                网格线用 shadcn Table 的单元格边框(设置页那张表的全框线观感),但必须:
+                  · border-separate + border-spacing-0 —— border-collapse 下边框由表格整体绘制,
+                    sticky 的 th 带背景压在上面时整行框线会看不见;
+                  · 单元格只留 右+下(border-t-0/border-l-0),否则相邻格子边框不合并会叠成 2px;
+                  · 表头背景必须不透明且与列表同色(bg-background),否则滚动时行会从表头透出来。 */}
+            <Table container={false} className="table-fixed border-separate border-spacing-0 text-xs">
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   {cols.map((c) => {
@@ -385,7 +405,7 @@ export function WsLogView() {
                       ? (sort!.dir === 'asc' ? '升序,点击改降序' : '降序,点击恢复默认(最新在前)')
                       : '点击按此列升序排序'
                     return (
-                      <TableHead key={c.key} className={`sticky top-0 z-10 border-b border-border bg-background ${c.cls}`}>
+                      <TableHead key={c.key} className={`sticky top-0 z-10 border-t-0 border-l-0 bg-background ${c.cls}`}>
                         <button onClick={() => toggleSort(c.key)} title={tip}
                           className="group inline-flex h-7 w-full items-center gap-1 text-left text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground">
                           <span className="min-w-0 truncate">{c.head}</span>
@@ -401,7 +421,7 @@ export function WsLogView() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((it, i) => {
+                {rows.map((it) => {
                   const selected = sel?.rowid === it.rowid
                   return (
                     <TableRow key={it.rowid} data-state={selected ? 'selected' : undefined}
@@ -409,11 +429,9 @@ export function WsLogView() {
                       onMouseEnter={() => onRowEnter(it)}
                       onMouseLeave={onRowLeave}
                       title={sel ? undefined : '点击在右侧查看请求/响应报文'}
-                      className={`h-7 cursor-pointer border-b border-border/60 hover:bg-accent/40 ${
-                        selected ? 'bg-sky-500/10' : i % 2 ? 'bg-card/40' : ''
-                      }`}>
+                      className="h-7 cursor-pointer hover:bg-accent/40 data-[state=selected]:bg-sky-500/10">
                       {cols.map((c) => (
-                        <TableCell key={c.key} className={`border-0 px-2 py-0 ${c.cls}`}>{c.render(it)}</TableCell>
+                        <TableCell key={c.key} className={`border-t-0 border-l-0 px-2 py-0 ${c.cls}`}>{c.render(it)}</TableCell>
                       ))}
                     </TableRow>
                   )
@@ -438,17 +456,31 @@ export function WsLogView() {
                 </button>
                 {([['info', '基本信息'], ['request', 'Request'], ['response', 'Response']] as const).map(([k, label]) => (
                   <button key={k} onClick={() => setWsLogTab(k)}
-                    className={`px-2 py-0.5 text-xs ${tab === k ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}>
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs ${tab === k ? 'bg-accent text-foreground' : 'text-muted-foreground hover:text-foreground'}`}>
                     {label}
+                    {k === 'request' && reqDirty && <span className="text-amber-600 dark:text-amber-400" title="入参已修改,重放会用它">•</span>}
                   </button>
                 ))}
+                {reqDirty && (
+                  <button onClick={() => setReqDraft(content?.request ?? '')}
+                    title="放弃修改,还原为日志里的原始入参"
+                    className="inline-flex items-center gap-1 border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground">
+                    <Undo2 className="h-3.5 w-3.5" />
+                    还原入参
+                  </button>
+                )}
                 <button
-                  onClick={() => void replayDebug(sel)}
-                  title="用该日志的报文重放此接口调用并进入调试(T100 r.dg 同款;现有会话会自动收口)"
-                  className="ml-auto inline-flex items-center gap-1 border border-emerald-500/20 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
+                  onClick={() => void replayDebug(sel, reqDirty ? reqDraft : undefined)}
+                  disabled={reqDirty && !!content?.requestPartial}
+                  title={reqDirty && content?.requestPartial
+                    ? '入参内容不完整(被截断或只剩入库前 2000 字符),不能基于它重放'
+                    : reqDirty
+                      ? '用上面编辑器里改过的入参重放此接口调用'
+                      : '用该日志的原始报文重放此接口调用(T100 r.dg 同款;现有会话会自动收口)'}
+                  className="ml-auto inline-flex items-center gap-1 border border-emerald-500/20 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 disabled:pointer-events-none disabled:opacity-40"
                 >
                   <Bug className="h-3.5 w-3.5" />
-                  调试此调用
+                  {reqDirty ? '用修改后的入参重放' : '调试此调用'}
                 </button>
                 {/* 报文页(Request / Response)的复制按钮:放在最右,即详情面板右上角 */}
                 {tab !== 'info' && (
@@ -467,10 +499,20 @@ export function WsLogView() {
                   </button>
                 )}
               </div>
-              <div className="min-h-0 flex-1 overflow-auto">
+              {/* 内容不完整时点明:按原报文重放没问题,但不能在编辑器里改完再重放 */}
+              {tab === 'request' && content?.requestPartial && (
+                <div className="shrink-0 border-b border-border bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+                  入参内容不完整(超过读取上限被截断,或源文件已清理只剩入库前 2000 字符):可以按原报文重放,但不能用修改后的入参重放。
+                </div>
+              )}
+              {/* 基本信息是普通内容流,需要外层滚动;报文页交给 Monaco 自己滚(嵌套滚动容器会出多余滚动条) */}
+              <div className={`min-h-0 flex-1 ${tab === 'info' ? 'overflow-auto' : 'overflow-hidden'}`}>
                 {tab === 'info' && <InfoBody item={sel} />}
-                {tab === 'request' && <PayloadBody text={content?.request} loading={!content} />}
-                {tab === 'response' && <PayloadBody text={content?.response} loading={!content} />}
+                {tab === 'request' && (
+                  <PayloadBody text={reqDraft} loading={!content} editable onChange={setReqDraft}
+                    path={`wslog:${sel.rowid}:req`} />
+                )}
+                {tab === 'response' && <PayloadBody text={content?.response} loading={!content} path={`wslog:${sel.rowid}:rsp`} />}
               </div>
             </div>
           </>
@@ -512,11 +554,19 @@ function InfoBody({ item }: { item: WSLogItem }) {
   )
 }
 
-// 报文内容(monospace pre)
-function PayloadBody({ text, loading }: { text?: string; loading: boolean }) {
-  if (loading) return <div className="p-3 text-xs text-muted-foreground">加载报文中…</div>
-  if (!text) return <div className="p-3 text-xs text-muted-foreground">无报文(超过入库大小上限且源文件已清理)</div>
+// 报文内容:与源码编辑器同一个 Monaco(同主题 = 同背景色)。
+// Request 页可编辑(改过的入参可直接用于重放),Response 页只读。
+function PayloadBody({ text, loading, path, editable, onChange }: {
+  text?: string; loading: boolean; path?: string; editable?: boolean; onChange?: (v: string) => void
+}) {
   return (
-    <pre className="whitespace-pre-wrap break-all p-2 font-mono text-[11px] leading-5 text-foreground">{text}</pre>
+    <PayloadEditor
+      text={text}
+      loading={loading}
+      path={path}
+      editable={editable}
+      onChange={onChange}
+      emptyHint="无报文(超过入库大小上限且源文件已清理)"
+    />
   )
 }

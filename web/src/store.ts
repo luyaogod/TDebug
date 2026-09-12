@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { api, httpStatusText, type Event, type StopInfo, type Breakpoint, type Frame, type VarItem, type WSLogItem, type WSLogContent, type WSLogQuery, type WSTestResult } from './api'
+import { api, type Event, type StopInfo, type Breakpoint, type Frame, type VarItem, type WSLogItem, type WSLogContent, type WSLogQuery, type WSTestResult } from './api'
 
 // timeline 条目(人/AI/系统 的操作与事件,可审计)
 export interface TimelineItem {
@@ -47,6 +47,8 @@ interface Store {
   // 最近一次接口日志重放(wslogs「调试此调用」)的日志 rowid:重放会话点「重新开始」
   // 时按同一日志重放(报文参数在后端),而不是普通启动丢参数;null = 普通作业调试
   lastReplayRowid: string | null
+  // 上次重放用的「改过的入参」(空 = 用原报文);重新开始时沿用它,避免编辑被悄悄丢弃
+  lastReplayRequest: string
   // 数据
   breakpoints: Breakpoint[]
   adjustedBps: Record<number, number> // 点击行号 → 实际注册断点编号(fgldb 会把非可执行行的断点自动下移)
@@ -69,17 +71,6 @@ interface Store {
   wsTestResult: WSTestResult | null
   wsTestRunning: boolean
   wsTestErr: string
-  // 服务测试日志(测试页常驻表格的行):原生 awsq990 用内存数组 g_wsfa2_d 记录,
-  // 不落库、刷新即清空;这里保留该语义,另存请求报文以便点击行回填。
-  wsTestHistory: {
-    at: string          // 起始时间 yyyy-MM-dd HH:mm:ss(记调用发起时刻)
-    url: string         // 目标地址(空 = 后端按当前环境推导的默认地址)
-    httpCode: number    // 0 = 未拿到响应
-    result: string      // 运行结果:HTTP 状态描述(OK/Not Found…);无响应时为错误文本
-    durationSec: number
-    body: string        // 该次请求报文(点击行回填请求区)
-    response: string
-  }[]
   wsLogs: WSLogItem[]
   wsLogsLoading: boolean
   wsLogsPage: number
@@ -98,7 +89,7 @@ interface Store {
   // 源码多页签:调试页固定第一个(跟随停站),浏览页为静态打开的其它源码文件
   tabs: SrcTab[]
   activeTab: string // 'debug' | tabs[].key
-  revealReq: { key: string; line: number; seq: number } | null // 定位信号:哪个页签滚到哪行(唯一驱动视口滚动)
+  revealReq: { key: string; line: number; seq: number; nav?: boolean } | null // 定位信号:哪个页签滚到哪行(唯一驱动视口滚动)
 
   // actions
   setWsConnected: (b: boolean) => void
@@ -107,7 +98,7 @@ interface Store {
   toggleStackAuto: () => void
   toggleAutovarsAuto: () => void
   // 接口日志重放启动(wslogs「调试此调用」与重放会话「重新开始」共用同一上下文)
-  replayStart: (rowid: string) => Promise<void>
+  replayStart: (rowid: string, request?: string) => Promise<void>
   setRightView: (v: 'debug' | 'outline' | 'session') => void
   pushRaw: (line: string) => void
   sendRaw: (cmd: string) => Promise<void>
@@ -117,7 +108,7 @@ interface Store {
   setLaunchError: (msg: string) => void
   setTheme: (t: 'dark' | 'light') => void
   setActiveTab: (key: string) => void
-  reveal: (key: string, line: number) => void
+  reveal: (key: string, line: number, nav?: boolean) => void
   closeTab: (key: string) => void
   openSourceTab: (file: string, line?: number) => Promise<void>
   locate: (word: string) => Promise<{ file: string; line: number }>
@@ -129,7 +120,7 @@ interface Store {
   prefetchWsLog: (item: WSLogItem) => void
   setWsLogTab: (t: 'info' | 'request' | 'response') => void
   closeWsLogDetail: () => void
-  replayDebug: (item: WSLogItem) => Promise<void>
+  replayDebug: (item: WSLogItem, request?: string) => Promise<void>
   launch: (module: string, prog: string) => Promise<void>
   refreshSnapshot: () => Promise<void>
   refreshSource: (file?: string, line?: number) => Promise<void>
@@ -155,6 +146,26 @@ interface Store {
 
 let snapTimer: number | undefined
 let holdTimer: number | undefined
+
+// 旧会话收口窗口:重放/重新开始都要先把上一个会话收口(同目标只结束本轮 = idle 复用宿主,
+// 不同目标直接断开),收口过程会上报 idle/exit/dead。宿主复用时新旧会话 ID 相同,这些收尾
+// 事件会跟着新会话一起通过上面的 sessionId 过滤,把刚置上的加载态清掉、或弹出"后端断开"
+// 的误报横幅。收口期间(以及响应后 2s,容忍 WS 迟到)丢弃它们;万一真的启动失败,后端还有
+// 「启动失败」日志兜底退出加载态,轮询也会兜底。
+let retireID: string | null = null
+let retireUntil = 0
+const RETIRE_GRACE_MS = 2000
+
+function beginRetire(id: string | null) { retireID = id; retireUntil = 0 }
+function endRetire() { if (retireID) retireUntil = Date.now() + RETIRE_GRACE_MS }
+function cancelRetire() { retireID = null; retireUntil = 0 }
+
+// 该事件是否属于"正在收口的旧会话"的收尾事件(需丢弃)
+function isRetiringTeardown(ev: Event): boolean {
+  if (!retireID || ev.sessionId !== retireID) return false
+  if (retireUntil && Date.now() >= retireUntil) { retireID = null; return false }
+  return ev.type === 'dead' || (ev.type === 'state' && (ev.state === 'idle' || ev.state === 'exit'))
+}
 
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }) }
 
@@ -199,7 +210,7 @@ export const useStore = create<Store>((set, get) => ({
   // 面板开关默认关(localStorage tdebug.stackAuto / tdebug.autovarsAuto 持久化)
   stackAuto: localStorage.getItem('tdebug.stackAuto') === '1',
   autovarsAuto: localStorage.getItem('tdebug.autovarsAuto') === '1',
-  lastReplayRowid: null,
+  lastReplayRowid: null, lastReplayRequest: '',
   // 右侧边栏默认落在「会话」(先选环境再调试);Tab 顺序见 App.tsx 右侧切换栏,不做持久化
   rightView: 'session',
   breakpoints: [], adjustedBps: {}, frames: [], watches: [], autovars: [], selectedFrame: -1, backendDead: '',
@@ -210,7 +221,7 @@ export const useStore = create<Store>((set, get) => ({
   wsLogs: [], wsLogsLoading: false, wsLogsPage: 1, wsLogsHasMore: false,
   wsLogSel: null, wsLogContent: null, wsLogTab: 'info', wsLogErr: '',
   wsTestMode: '3', wsTestUrl: '', wsTestBody: '', wsTestSoap: false,
-  wsTestResult: null, wsTestRunning: false, wsTestErr: '', wsTestHistory: [],
+  wsTestResult: null, wsTestRunning: false, wsTestErr: '',
   sourceContent: '', sourcePath: '', sourceDVM: '', currentLine: 0, loadingSource: false, lineOffset: 0,
   tabs: [], activeTab: 'debug', revealReq: null,
 
@@ -273,6 +284,8 @@ export const useStore = create<Store>((set, get) => ({
   onEvent: (ev) => {
     const st = get()
     if (st.sessionId && ev.sessionId && ev.sessionId !== st.sessionId) return
+    // 刚点重放/重新开始:旧会话的收尾事件不得清掉新会话的加载态(见 retireID 注释)
+    if (isRetiringTeardown(ev)) return
     switch (ev.type) {
       case 'output':
         st.pushRaw(ev.text || '')
@@ -367,9 +380,15 @@ export const useStore = create<Store>((set, get) => ({
 
   setActiveTab: (key) => set({ activeTab: key }),
 
-  reveal: (key, line) => {
+  // 定位信号(唯一驱动视口滚动)。
+  // nav=true = 纯浏览跳转(断点列表点击):只滚视口,不动 currentLine(黄色停站高亮仍留在
+  // 程序真正停的那行),也不受"仅停站可定位"的调试门限制——与大纲点击同一语义。
+  reveal: (key, line, nav = false) => {
     if (!(line > 0)) return
-    set((st) => ({ revealReq: { key, line, seq: (st.revealReq?.seq ?? 0) + 1 }, currentLine: key === 'debug' ? line : st.currentLine }))
+    set((st) => ({
+      revealReq: { key, line, nav, seq: (st.revealReq?.seq ?? 0) + 1 },
+      currentLine: !nav && key === 'debug' ? line : st.currentLine,
+    }))
   },
 
   locate: async (word) => {
@@ -445,25 +464,10 @@ export const useStore = create<Store>((set, get) => ({
 
   runWsTest: async () => {
     const st = get()
-    // 起始时间取调用发起时刻(原生在调用结束后才打戳;列名叫"起始时间",此处按列名语义取值)
-    const d = new Date()
-    const p2 = (n: number) => String(n).padStart(2, '0')
-    const at = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
     set({ wsTestRunning: true, wsTestErr: '' })
     try {
       const { result } = await api.wsTest(st.wsTestMode, st.wsTestUrl, st.wsTestBody, st.wsTestSoap)
       set({ wsTestResult: result })
-      // 每次都记一行(含请求失败/无响应:httpCode=0,运行结果记错误文本;原生 CATCH 分支同样会记一行)
-      const entry = {
-        at,
-        url: st.wsTestUrl || '(默认地址)',
-        httpCode: result.httpCode,
-        result: httpStatusText(result.httpCode, result.error),
-        durationSec: result.durationSec,
-        body: st.wsTestBody,
-        response: result.response,
-      }
-      set((s) => ({ wsTestHistory: [entry, ...s.wsTestHistory].slice(0, 50) }))
     } catch (e: any) {
       set({ wsTestErr: e.message || String(e) })
     } finally {
@@ -514,45 +518,56 @@ export const useStore = create<Store>((set, get) => ({
   // 关闭日志详情面板:回到"只显示列表"的默认态
   closeWsLogDetail: () => set({ wsLogSel: null, wsLogContent: null }),
 
-  replayDebug: async (item) => {
-    await get().replayStart(item.rowid)
+  replayDebug: async (item, request) => {
+    await get().replayStart(item.rowid, request)
   },
 
   // 接口日志重放启动:立即切到 debug 页进 loading,再请求后端重放该日志
-  // (后端按 rowid 重读报文并落临时文件,报文参数在 ArgsOverride 里,随会话保留)
-  replayStart: async (rowid) => {
-    set({ view: 'debug', wsLogErr: '', launching: true, launchError: '', state: 'loading' })
+  // (后端按 rowid 重读报文并落临时文件,报文参数在 ArgsOverride 里,随会话保留);
+  // request 非空 = 用界面改过的入参(后端写临时文件后优先使用)
+  replayStart: async (rowid, request) => {
+    // 已有会话在跑:先结束它(一次只能调一个作业;后端重放也会收口,双保险)。
+    // ID 记下来:后面还要用它发 quit,也是收口窗口的判定依据
+    const old = get().sessionId
+    beginRetire(old)
+    // 一进 debug 页就进加载态:后端要 SSH 登录 + 解析作业 + 重读报文才返回(秒级),
+    // 若等响应回来才置 loadingSource,这段时间编辑器既没内容也不转圈,像卡住。
+    // 同时清掉上一会话的调试现场,避免"加载中"的画面里残留旧的时间线/调用栈
+    set({
+      view: 'debug', wsLogErr: '', launchError: '', launching: true, state: 'loading',
+      sessionId: null,
+      timeline: [], rawLog: [], watches: [], autovars: [], backendDead: '',
+      selectedFrame: -1, stop: null, frames: [], breakpoints: [],
+      sourceContent: '', sourcePath: '', sourceDVM: '', currentLine: 0, lineOffset: 0,
+      loadingSource: true, lastReplayRowid: rowid, lastReplayRequest: request ?? '',
+    })
     try {
-      // 已有会话在跑:先结束它(一次只能调一个作业;后端重放也会收口,双保险)
-      const old = get().sessionId
-      if (old) {
-        set({ sessionId: null })
-        void api.quit(old).catch(() => {})
-      }
-      const r = await api.wsLogDebug(rowid)
+      if (old) void api.quit(old).catch(() => {})
+      const r = await api.wsLogDebug(rowid, request)
       const mod = r.module || ''
       const rp = r.runProg || r.prog || ''
       set({
         sessionId: r.sessionId, module: mod, prog: r.prog || rp,
-        runProg: rp, state: 'loading', lastReplayRowid: rowid,
-        timeline: [], rawLog: [], watches: [], autovars: [],
-        backendDead: '', selectedFrame: -1, stop: null, breakpoints: [], frames: [],
-        sourceContent: '', sourcePath: '', sourceDVM: '', currentLine: 0, loadingSource: true,
+        runProg: rp, state: 'loading', sourceDVM: '', currentLine: 0, loadingSource: true,
       })
       // 入口停站前保持加载态,源码由会话路径加载并定位 MAIN
       pollUntilStopped(set, get)
     } catch (e: any) {
+      cancelRetire()
       set({ wsLogErr: e.message || String(e), state: '', launchError: `启动失败: ${e.message}`, sessionId: null, loadingSource: false, stop: null })
     } finally {
+      endRetire()
       set({ launching: false })
     }
   },
 
   launch: async (module, prog) => {
-    set({ launching: true, launchError: '', timeline: [], rawLog: [], watches: [], autovars: [], backendDead: '', selectedFrame: -1, lastReplayRowid: null })
+    set({ launching: true, launchError: '', timeline: [], rawLog: [], watches: [], autovars: [], backendDead: '', selectedFrame: -1, lastReplayRowid: null, lastReplayRequest: '' })
     // 启动调试:编辑器进入加载态(转圈),入口停站定位 MAIN 后一次性显示源码,
     // 避免启动过程中内容跳来跳去
     set({ sourceContent: '', sourcePath: '', sourceDVM: '', currentLine: 0, loadingSource: true })
+    // 同 replayStart:上一会话(同目标会被复用,ID 与新一轮相同)的收尾事件不得清掉加载态
+    beginRetire(get().sessionId)
     try {
       const r = await api.launch(module, prog)
       // 作业编号解析:后端连 gzzz_t 后回读模块与实体程序(aint301_wf → aint302_wf)
@@ -565,10 +580,12 @@ export const useStore = create<Store>((set, get) => ({
       pollUntilStopped(set, get)
     } catch (e: any) {
       // 同步失败(如 prog 缺失/配置非法):HTTP 直接报错,同样必须退出加载态
+      cancelRetire()
       get().pushTimeline({ origin: 'system', kind: 'warn', text: `启动失败: ${e.message}` })
       set({ launchError: `启动失败: ${e.message}`, sessionId: null, state: '', loadingSource: false, stop: null, currentLine: 0 })
       throw e
     } finally {
+      endRetire()
       set({ launching: false })
     }
   },
@@ -801,11 +818,12 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
-  // 断点列表点击跳转:必要时切换到断点所在文件,再定位到断点行(不改变运行上下文)
+  // 断点列表点击跳转:必要时切换到断点所在文件,再定位到断点行。
+  // 纯浏览跳转(nav):只滚视口,不把黄色停站高亮拽到断点行(不改变运行上下文)
   jumpToBp: async (b) => {
     const st = get()
     if (b.file && b.file !== st.sourceDVM) await st.refreshSource(b.file)
-    get().reveal('debug', b.line)
+    get().reveal('debug', b.line, true)
   },
 
   // 运行到光标:当前文件即停站文件时用行号,否则带文件名(fgldb until [file:]line)
@@ -847,15 +865,15 @@ export const useStore = create<Store>((set, get) => ({
   restart: async () => {
     const st = get()
     if (!st.sessionId) return
-    const { module, prog, lastReplayRowid } = st
-    st.pushTimeline({ origin: 'human', kind: 'command', text: `重新开始 ${module}/${prog}${lastReplayRowid ? '(按原接口日志重放)' : ''}` })
+    const { module, prog, lastReplayRowid, lastReplayRequest } = st
+    st.pushTimeline({ origin: 'human', kind: 'command', text: `重新开始 ${module}/${prog}${lastReplayRowid ? (lastReplayRequest ? '(按接口日志重放,用改过的入参)' : '(按原接口日志重放)') : ''}` })
     try { await api.quit(st.sessionId) } catch { /* 忽略,直接重启 */ }
     if (snapTimer) { clearInterval(snapTimer); snapTimer = undefined }
     stopHoldTimer()
     // 结束本轮(会话保留 idle),再启动新的一轮——宿主复用,免重新登录。
     // 重放会话必须按原日志重放(报文参数在服务端 ArgsOverride 里,普通启动会丢参数)
     set({ state: 'idle', started: false, stop: null, breakpoints: [], frames: [], adjustedBps: {}, autovars: [], selectedFrame: -1, currentLine: 0 })
-    if (lastReplayRowid) await get().replayStart(lastReplayRowid)
+    if (lastReplayRowid) await get().replayStart(lastReplayRowid, lastReplayRequest || undefined)
     else await get().launch(module, prog)
   },
 
