@@ -18,15 +18,83 @@ type RuntimeEnv struct {
 	COM             string    // $TOP/com
 	FGLDIR          string    // /u1/genero/fgl
 	FGLResourcePath string    // $ERP:$COM
+	Topent          string    // 登录回读的 $TOPENT(选区/环境脚本给的当前企业;未设置时为空)
 	FetchedAt       time.Time // 获取时间(缓存 TTL 判定)
 }
 
 // Valid 动态环境是否可用
 func (e *RuntimeEnv) Valid() bool { return e != nil && e.TOP != "" && e.ERP != "" }
 
-// reTEnvKV 匹配探针脚本回显的环境变量。TDICT_* 是本地写进远端 shell 的协议标记
-// (脚本自己 echo 出来,不是远端已有变量),与 TDictCli 保持一致:改名无收益且必须真机验证。
-var reTEnvKV = regexp.MustCompile(`^(TDICT_TOP|TDICT_ERP|TDICT_COM|TDICT_FGLDIR|TDICT_FGLRESOURCEPATH)=(\S*)\s*$`)
+// 探针回显协议:两个定界符之间只回显真实的变量名与值(TOP=/u1/t35prd 这种)。
+// TDBG 是本工具自己的本地标记命名空间(见 README 的 TDBG_RAW),不是远端环境变量名 ——
+// 之所以需要定界符,是因为 PTY 只有纯文本:登录脚本自己也会打印 ZONE = t35prd、
+// TOPENT   = 99 这类行,没有区间就无法区分「我方请求的值」和「服务器自己打印的内容」。
+const (
+	TEnvBegin = "TDBG-BEGIN"
+	TEnvEnd   = "TDBG-END"
+)
+
+// TEnvProbe 回读 T100 环境变量的探针(调用方自行补 \r 或塞进脚本)。
+// 登录式探针与会话登录共用本函数,保证两处格式永远一致。
+// ${TOPENT-} 用 POSIX 默认值展开:TOPENT 可能未设置,不能因 profile 开了 set -u
+// 让整条回显报错;未设置时回显为空本身就是有效信息。
+func TEnvProbe() string {
+	return "echo " + TEnvBegin +
+		"; echo TOP=$TOP; echo ERP=$ERP; echo COM=$COM; echo FGLDIR=$FGLDIR" +
+		"; echo FGLRESOURCEPATH=$FGLRESOURCEPATH; echo TOPENT=${TOPENT-}" +
+		"; echo " + TEnvEnd
+}
+
+// reTEnvKV 匹配定界符内的取值行。TOPENT 排在 TOP 之前:后者是前者的前缀,
+// 顺序写反时靠回溯仍能匹配上,显式前置可避免后续维护踩坑。
+var reTEnvKV = regexp.MustCompile(`^(TOPENT|TOP|FGLRESOURCEPATH|FGLDIR|ERP|COM)=(\S*)\s*$`)
+
+// TEnvParser 解析探针回显:只有严格落在 TEnvBegin/TEnvEnd 两个独立行之间的取值行
+// 才会被采纳。这样挡掉两类污染 ——
+//   - PTY 会把我方发去的整条命令原样回显,该行虽含定界符文本,但不是独立一行;
+//   - 命令超宽被终端换行 / 行编辑重绘产生的碎片,同样落在区间之外。
+//
+// Feed 传参需为已 TrimSpace 的整行。
+type TEnvParser struct {
+	env     RuntimeEnv
+	inBlock bool
+}
+
+// Feed 处理一行,返回 true 表示已见到结束定界符(调用方可停止读取)。
+func (p *TEnvParser) Feed(line string) bool {
+	switch line {
+	case TEnvBegin:
+		p.inBlock = true
+		return false
+	case TEnvEnd:
+		return true
+	}
+	if !p.inBlock {
+		return false
+	}
+	m := reTEnvKV.FindStringSubmatch(line)
+	if m == nil {
+		return false
+	}
+	switch m[1] {
+	case "TOP":
+		p.env.TOP = m[2]
+	case "ERP":
+		p.env.ERP = m[2]
+	case "COM":
+		p.env.COM = m[2]
+	case "FGLDIR":
+		p.env.FGLDIR = m[2]
+	case "FGLRESOURCEPATH":
+		p.env.FGLResourcePath = m[2]
+	case "TOPENT":
+		p.env.Topent = m[2]
+	}
+	return false
+}
+
+// Env 返回已解析到的环境(FetchedAt 由调用方按需补)。
+func (p *TEnvParser) Env() *RuntimeEnv { return &p.env }
 
 // reZone 区域代码白名单(31/35/36/39/t/36k/1 等):允许数字/字母/下划线/连字符,防注入
 var reZone = regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`)
@@ -126,12 +194,13 @@ func probeTEnvLogin(conn *SSHConn, zone string) (*RuntimeEnv, error) {
 	if err := waitFor(ReShellPrompt, 15*time.Second, "shell 提示符"); err != nil {
 		return nil, err
 	}
-	// 4. 回显环境变量
-	if err := pty.Write("echo TDICT_TOP=$TOP; echo TDICT_ERP=$ERP; echo TDICT_COM=$COM; echo TDICT_FGLDIR=$FGLDIR; echo TDICT_FGLRESOURCEPATH=$FGLRESOURCEPATH; echo TDICT_END\r"); err != nil {
+	// 4. 回显环境变量(共用 TEnvProbe:定界符 + 真实变量名)
+	if err := pty.Write(TEnvProbe() + "\r"); err != nil {
 		return nil, err
 	}
-	// 5. 解析回显
+	// 5. 解析回显(只认定界符之间的取值行)
 	env := &RuntimeEnv{}
+	var p TEnvParser
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
@@ -139,27 +208,13 @@ func probeTEnvLogin(conn *SSHConn, zone string) (*RuntimeEnv, error) {
 			if !ok {
 				return nil, fmt.Errorf("回显 T100 环境变量时连接已关闭")
 			}
-			ln = strings.TrimSpace(ln)
-			if ln == "TDICT_END" {
+			if p.Feed(strings.TrimSpace(ln)) {
+				env = p.Env()
 				if !env.Valid() {
 					return nil, fmt.Errorf("回显未包含 TOP/ERP(区域 %s 环境脚本未加载?)", zone)
 				}
 				env.FetchedAt = time.Now()
 				return env, nil
-			}
-			if m := reTEnvKV.FindStringSubmatch(ln); m != nil {
-				switch m[1] {
-				case "TDICT_TOP":
-					env.TOP = m[2]
-				case "TDICT_ERP":
-					env.ERP = m[2]
-				case "TDICT_COM":
-					env.COM = m[2]
-				case "TDICT_FGLDIR":
-					env.FGLDIR = m[2]
-				case "TDICT_FGLRESOURCEPATH":
-					env.FGLResourcePath = m[2]
-				}
 			}
 		case <-deadline:
 			return nil, fmt.Errorf("回显 T100 环境变量超时")
@@ -184,12 +239,15 @@ source /u1/etc/chenv >/dev/null 2>&1
 source /u3/pub/etc/topenv >/dev/null 2>&1
 source /u1/etc/topenv >/dev/null 2>&1
 source /u1/etc/topsys >/dev/null 2>&1
-echo TDICT_TOP=$TOP
-echo TDICT_ERP=$ERP
-echo TDICT_COM=$COM
-echo TDICT_FGLDIR=$FGLDIR
-echo TDICT_FGLRESOURCEPATH=$FGLRESOURCEPATH
-'`, z, z)
+echo %s
+echo TOP=$TOP
+echo ERP=$ERP
+echo COM=$COM
+echo FGLDIR=$FGLDIR
+echo FGLRESOURCEPATH=$FGLRESOURCEPATH
+echo TOPENT=${TOPENT-}
+echo %s
+'`, z, z, TEnvBegin, TEnvEnd)
 }
 
 // probeTEnvScript 旧版 exec 通道探针(选项号直接当 ZONE 变量用,仅适用于菜单码与
@@ -204,23 +262,14 @@ func probeTEnvScript(conn *SSHConn, zone string) (*RuntimeEnv, error) {
 	if err != nil && out == "" {
 		return nil, fmt.Errorf("探测 T100 环境失败: %w", err)
 	}
-	env := &RuntimeEnv{FetchedAt: time.Now()}
+	var p TEnvParser
 	for _, ln := range strings.Split(out, "\n") {
-		if m := reTEnvKV.FindStringSubmatch(strings.TrimSpace(ln)); m != nil {
-			switch m[1] {
-			case "TDICT_TOP":
-				env.TOP = m[2]
-			case "TDICT_ERP":
-				env.ERP = m[2]
-			case "TDICT_COM":
-				env.COM = m[2]
-			case "TDICT_FGLDIR":
-				env.FGLDIR = m[2]
-			case "TDICT_FGLRESOURCEPATH":
-				env.FGLResourcePath = m[2]
-			}
+		if p.Feed(strings.TrimSpace(ln)) {
+			break
 		}
 	}
+	env := p.Env()
+	env.FetchedAt = time.Now()
 	if !env.Valid() {
 		return nil, fmt.Errorf("未探测到 T100 环境变量(TOP 为空,区域 %s 环境脚本未加载?)", zone)
 	}

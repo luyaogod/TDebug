@@ -217,7 +217,7 @@ type Session struct {
 	envName        string // 会话所连环境名(设置页 envs 名称;空 = 顶层默认/推导名)
 	booted         bool   // 是否已完成首次登录(菜单→shell),宿主可复用
 	shellReady     bool   // pty 当前停在 shell 提示符,可直接敲 shell 命令
-	topentOverride string // 会话内手动设置的 TOPENT(空 = 未设置,按配置/登录默认)
+	topentOverride string // 会话内手动设置的 TOPENT(空 = 未设置,按配置默认)
 }
 
 // NewSession 建立 SSH 连接并打开 PTY(登录与启动由 Launch 驱动)。
@@ -383,7 +383,8 @@ func (s *Session) beginRun() {
 	}
 }
 
-// bootHost 首次登录:区域菜单 → 选区 → shell → 回读运行时环境。仅调用一次。
+// bootHost 首次登录:区域菜单 → 选区 → shell → 回读运行时环境 → 下发环境默认 TOPENT。
+// 仅调用一次。
 func (s *Session) bootHost(ctx context.Context) error {
 	// 1. 等区域菜单
 	// 菜单格式两种:109 那台 `(*)Exit`,金仓这台 `*)Exit`(无左括号)
@@ -396,7 +397,18 @@ func (s *Session) bootHost(ctx context.Context) error {
 		return err
 	}
 	s.markShellReady()
-	// 2.5 回读登录后的权威 T100 路径(选区后环境变量,与标准 debug 同源)。
+	// 2.5 连接即下发环境默认 TOPENT(配置企业;会话内已有手动覆盖时用覆盖值)。
+	// 选区只给机器默认(日志里那行 TOPENT = 99),配置里的企业原本要等下一轮调试启动才
+	// export,会让"刚连上的会话"与设置页不一致 —— 故登录后立即下发,会话企业从一开始就是配置值。
+	// 空值不下发(保持选区登录默认),与 topentForRun 语义一致。
+	// 特意放在回读之前:回读到的 TOPENT 就是下发后的当前真实值,界面不必自行推断。
+	if ent := s.topentForRun(); ent != "" {
+		if err := s.applyTopentToShell(ent); err != nil {
+			return fmt.Errorf("登录 %s(环境 %s)后下发默认 TOPENT=%q 失败: %w",
+				s.cfg.SSH.Host, s.envName, ent, err)
+		}
+	}
+	// 2.6 回读登录后的权威 T100 路径(选区后环境变量,与标准 debug 同源)。
 	// T100 路径只来自登录动态获取:回读失败即登录失败,无静态配置可回退
 	if err := s.readRuntimeEnv(); err != nil {
 		return fmt.Errorf("登录 %s(环境 %s,zone %s)后回读 T100 路径失败: %w",
@@ -460,9 +472,16 @@ func (s *Session) startRun(ctx context.Context, launchProg string) error {
 	}
 	// TOPENT:会话内手动设置优先,其次配置企业(ENT);都没有则不导出,沿用选区登录默认
 	// (选区输出的是机器默认值如「TOPENT = 99」;作业运行/数据库连接都以 TOPENT 为准)
+	// 连接时(bootHost)已下发过一次,这里再下发是为了覆盖"会话开着时在设置页改了配置"的情况。
 	if ent := s.topentForRun(); ent != "" {
-		// 单引号包裹并剔除内嵌单引号(值不限文本,防注入/拆词),与 SetTopent 同规则
+		// 单引号包裹并剔除内嵌单引号(值不限文本,防注入/拆词),与 topentShellCmd 同规则
 		setup += "export TOPENT='" + strings.ReplaceAll(ent, "'", "") + "'\r\n"
+		// 本轮起 shell 里的 TOPENT 即 ent:同步运行时回读值,界面显示的"当前会话 TOPENT"才不滞后
+		s.mu.Lock()
+		if s.cfg.Runtime != nil {
+			s.cfg.Runtime.Topent = ent
+		}
+		s.mu.Unlock()
 	}
 	s.pty.Write(setup)
 	if err := s.waitRegexp(host.ReShellPrompt, 15*time.Second, "shell 提示符(cd)"); err != nil {
@@ -566,7 +585,7 @@ func (s *Session) SetRun(cfg *Config, module, prog, runProg, launchRef, extra st
 	s.custModule = ""
 }
 
-// TopentOverride 会话内手动设置的 TOPENT(空 = 未设置,按配置/登录默认)
+// TopentOverride 会话内手动设置的 TOPENT(空 = 未设置,按配置默认)
 func (s *Session) TopentOverride() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -580,6 +599,18 @@ func (s *Session) TopentCfg() string {
 	return strings.TrimSpace(string(s.cfg.Topent))
 }
 
+// TopentShell 登录后 shell 里实际回读到的 $TOPENT(选区/环境脚本给的企业;空 = 登录未导出)。
+// 与 TopentCfg 的区别:连接会话本身不 export TOPENT,只有下一轮调试启动才 export
+// override/配置值,所以"当前连的是哪个企业"以本值为准,供界面展示给用户参考。
+func (s *Session) TopentShell() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.Runtime == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.cfg.Runtime.Topent)
+}
+
 // topentForRun 本轮运行生效的 TOPENT:会话内手动设置优先,其次配置企业(TOPENT),再否则不导出(沿用登录默认)
 func (s *Session) topentForRun() string {
 	s.mu.Lock()
@@ -590,31 +621,70 @@ func (s *Session) topentForRun() string {
 	return strings.TrimSpace(string(s.cfg.Topent))
 }
 
-// SetTopent 空闲态重新设置宿主 shell 的 TOPENT(空值 = 清除手动设置,回到配置/登录默认)。
-// 立即 export/unset 到 shell,并在随后各轮调试启动时优先导出该值。
+// SetTopent 空闲态重新设置宿主 shell 的 TOPENT(空值 = 清除手动覆盖,回到环境默认 TOPENT)。
+// 立即 export 到 shell(清除时下发环境默认值,环境也没配才 unset),随后的各轮调试仍按
+// topentForRun 优先导出覆盖值。
 func (s *Session) SetTopent(value string) error {
 	s.mu.Lock()
 	s.topentOverride = value
 	s.mu.Unlock()
-	cmd := "unset TOPENT; echo TDICT_TOPENT_OK\r"
-	if value != "" {
-		// 值不限数字/文本:shell 单引号包裹并剔除内嵌单引号,防注入/拆词
-		q := "'" + strings.ReplaceAll(value, "'", "") + "'"
-		cmd = "export TOPENT=" + q + "; echo TDICT_TOPENT_OK\r"
+	// 清除覆盖(空值)不能简单 unset:连接时已把环境默认下发进 shell,unset 会掉回选区机器默认,
+	// 与"会话企业 = 设置页配置"不一致。这里直接下发 topentForRun()(覆盖值 || 配置企业;
+	// 都没有才是空 = unset),让宿主 shell 的 TOPENT 恒等于当前生效值。
+	eff := s.topentForRun()
+	if err := s.applyTopentToShell(eff); err != nil {
+		return err
 	}
-	if err := s.pty.Write(cmd); err != nil {
-		return fmt.Errorf("写入终端失败: %w", err)
+	if value == "" {
+		if eff != "" {
+			s.emitEvent(Event{Type: "log", Text: fmt.Sprintf("已清除 TOPENT 覆盖,回到环境默认 %q", eff)})
+		} else {
+			s.emitEvent(Event{Type: "log", Text: "已清除 TOPENT 覆盖(环境未配置,shell 内已 unset)"})
+		}
+		return nil
 	}
-	// 等待 shell 回执(确认命令已被执行;失败只记日志,不阻断保存)
-	if err := s.waitRegexp(reTopentOK, 5*time.Second, "TOPENT 设置回执"); err != nil {
-		s.emitEvent(Event{Type: "log", Text: "TOPENT 已保存但未等到 shell 回执: " + err.Error()})
-	}
-	s.emitEvent(Event{Type: "log", Text: fmt.Sprintf("TOPENT 已设置为 %q(会话内,下一轮调试生效)", value)})
+	s.emitEvent(Event{Type: "log", Text: fmt.Sprintf("TOPENT 已设置为 %q(会话内,立即生效)", value)})
 	return nil
 }
 
-// reTopentOK SetTopent 的 shell 回执标记
-var reTopentOK = regexp.MustCompile(`TDICT_TOPENT_OK`)
+// applyTopentToShell 把 value 直接 export/unset 到宿主 shell(空值 = 清除)。
+// 只动 shell、不记录 override:SetTopent(会话内手动设置)与 bootHost(连接时下发环境默认)共用。
+// 回执超时只记日志不报错(命令通常已生效);写入终端失败才返回错误。
+func (s *Session) applyTopentToShell(value string) error {
+	if err := s.pty.Write(topentShellCmd(value)); err != nil {
+		return fmt.Errorf("写入终端失败: %w", err)
+	}
+	// 等待 shell 回执(确认命令已被执行)
+	if err := s.waitRegexp(reTopentOK, 5*time.Second, "TOPENT 设置回执"); err != nil {
+		s.emitEvent(Event{Type: "log", Text: "TOPENT 已下发但未等到 shell 回执: " + err.Error()})
+	}
+	// shell 里的 TOPENT 已变成 value(或已 unset):同步运行时回读值,
+	// 使界面显示的"当前会话 TOPENT"就是 shell 真实值,而不是登录那一刻的旧值。
+	s.mu.Lock()
+	if s.cfg.Runtime != nil {
+		s.cfg.Runtime.Topent = value
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// topentShellCmd 拼出把 TOPENT 下发到宿主 shell 的命令(空值 = unset)。
+// 值不限数字/文本:shell 单引号包裹并剔除内嵌单引号,防注入/拆词。
+func topentShellCmd(value string) string {
+	if value == "" {
+		return "unset TOPENT; echo " + reTopentOKMark + "\r"
+	}
+	q := "'" + strings.ReplaceAll(value, "'", "") + "'"
+	return "export TOPENT=" + q + "; echo " + reTopentOKMark + "\r"
+}
+
+// reTopentOKMark TOPENT 下发回执标记(TDBG 是本工具自己的本地标记,非远端变量名)
+const reTopentOKMark = "TDBG-TOPENT-OK"
+
+// reTopentOK 回执标记:必须匹配独占一行的回执。
+// PTY 会把我方发去的整条命令原样回显,该行同样含有本标记字符串 ——
+// 用子串匹配会在命令被 shell 执行之前就"等到回执",锚定整行才能排除命令回显本身。
+var reTopentOK = regexp.MustCompile(`^\s*` + reTopentOKMark + `\s*$`)
 
 // enterIdle 把会话置为空闲(宿主 shell 保留、无调试运行)并广播 state=idle。
 // 程序自然退出 / 结束调试 / 复用启动失败都会回到这个状态。
@@ -683,39 +753,27 @@ func (s *Session) entryStopInfo() *StopInfo {
 // readRuntimeEnv 在选区后的 shell 里回显关键 T100 环境变量并写入 cfg.Runtime。
 // 选区后是真实登录环境(与标准 debug 完全同源),是路径的最权威来源;
 // 失败由调用方(bootHost)作为登录失败报错——T100 路径无静态配置可回退。
-// TDICT_BEGIN/TDICT_END 等标记是本地回显的定位符(非远端变量),与 TDictCli 保持一致,勿改名。
+// 探针与解析共用 host 层的 TEnvProbe/TEnvParser:定界符之间只回显真实变量名,
+// 且只有区间内的取值行才被采纳(命令回显与终端重绘碎片都不会污染取值)。
 func (s *Session) readRuntimeEnv() error {
-	probe := `echo TDICT_BEGIN; echo TDICT_TOP=$TOP; echo TDICT_ERP=$ERP; echo TDICT_COM=$COM; echo TDICT_FGLDIR=$FGLDIR; echo TDICT_FGLRESOURCEPATH=$FGLRESOURCEPATH; echo TDICT_END`
-	if err := s.pty.Write(probe + "\r"); err != nil {
+	if err := s.pty.Write(host.TEnvProbe() + "\r"); err != nil {
 		return err
 	}
-	env := &host.RuntimeEnv{}
+	var p host.TEnvParser
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case ln := <-s.lines:
-			ln = strings.TrimSpace(ln)
-			if ln == "TDICT_END" {
+			if p.Feed(strings.TrimSpace(ln)) {
+				env := p.Env()
 				if !env.Valid() {
 					return fmt.Errorf("未回显到 TOP/ERP(环境脚本未设置 $TOP?)")
 				}
-				s.mu.Lock()
 				env.FetchedAt = time.Now()
+				s.mu.Lock()
 				s.cfg.Runtime = env
 				s.mu.Unlock()
 				return nil
-			}
-			switch {
-			case strings.HasPrefix(ln, "TDICT_TOP="):
-				env.TOP = strings.TrimPrefix(ln, "TDICT_TOP=")
-			case strings.HasPrefix(ln, "TDICT_ERP="):
-				env.ERP = strings.TrimPrefix(ln, "TDICT_ERP=")
-			case strings.HasPrefix(ln, "TDICT_COM="):
-				env.COM = strings.TrimPrefix(ln, "TDICT_COM=")
-			case strings.HasPrefix(ln, "TDICT_FGLDIR="):
-				env.FGLDIR = strings.TrimPrefix(ln, "TDICT_FGLDIR=")
-			case strings.HasPrefix(ln, "TDICT_FGLRESOURCEPATH="):
-				env.FGLResourcePath = strings.TrimPrefix(ln, "TDICT_FGLRESOURCEPATH=")
 			}
 		case <-deadline:
 			return fmt.Errorf("回读 T100 环境变量超时")

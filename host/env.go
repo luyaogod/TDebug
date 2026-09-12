@@ -54,7 +54,7 @@ type NamedSsh struct {
 	Name            string               `json:"name"`
 	SSHConfig                            // 匿名嵌入:host/port/user/password 提升到 ssh 层
 	Zone            string               `json:"zone,omitempty"`   // 登录后区域菜单代码:31开发 35测试 36正式 39PATCH t出货
-	Topent          EntValue             `json:"topent,omitempty"` // 默认企业编号(TOPENT);调试会话 export 用
+	Topent          EntValue             `json:"topent,omitempty"` // 默认企业编号(TOPENT);连接会话即下发,会话内可覆盖
 	LaunchArgs      string               `json:"launchArgs,omitempty"`
 	WatchdogSeconds int                  `json:"watchdogSeconds,omitempty"`
 	DB              *dbconfig.Connection `json:"db,omitempty"` // 该环境的数据库连接(与 SSH 一对一;显式 host/port/service|库名+账号列表)

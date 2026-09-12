@@ -89,7 +89,7 @@ Windows 一键打包（exe + config + README → dist/tddebug-portable.zip）：
         "name": "恒烁测试区",
         "host": "10.0.0.2", "port": 22, "user": "tiptop", "password": "tiptop",
         "zone": "2",                // 登录菜单选项号(31开发/35测试/36正式/…)
-        "topent": "9999",           // 默认企业编号(调试会话 export TOPENT)
+        "topent": "9999",           // 默认企业编号(连接会话即下发到 shell;会话内可覆盖)
         "launchArgs": "",           // 覆盖全局启动参数模板({prog} 替换为作业名)
         "watchdogSeconds": 0,       // 覆盖全局看门狗秒数
         "db": {                     // 该环境一对一挂的数据库(作业解析/日志查询用)

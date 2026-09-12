@@ -4,7 +4,7 @@ package cli
 //   tdebug env           列出全部已配置环境与当前生效项(基于 /api/settings + /api/sessions)
 //   tdebug env <名称>     切换当前环境到该环境(重连会话,等会话回 idle)
 //   tdebug topent        显示当前会话的 TOPENT override 与配置级默认
-//   tdebug topent <值>    设置会话级 TOPENT override(仅 idle;下一轮调试生效)
+//   tdebug topent <值>    设置会话级 TOPENT override(仅 idle;立即下发到会话)
 //   tdebug topent --clear 清除会话级 TOPENT override(回退配置默认)
 //
 // 与 debugctl 其它命令一致:均经 tdebug serve 的 REST 接口执行。
@@ -25,11 +25,12 @@ var (
 
 // dbgSnapshot 会话快照中本命令关心的字段。
 type dbgSnapshot struct {
-	ID        string `json:"id"`
-	Env       string `json:"env"`
-	State     string `json:"state"`
-	Topent    string `json:"topent"`    // 会话内手动设置的 TOPENT override(空=未设置)
-	TopentCfg string `json:"topentCfg"` // 配置级企业 TOPENT 默认(该环境 db.ent)
+	ID          string `json:"id"`
+	Env         string `json:"env"`
+	State       string `json:"state"`
+	Topent      string `json:"topent"`      // 会话内手动设置的 TOPENT override(空=未设置)
+	TopentCfg   string `json:"topentCfg"`   // 配置级企业 TOPENT 默认(该环境 db.ent)
+	TopentShell string `json:"topentShell"` // 当前会话 shell 里的实际 TOPENT(连接时已按配置下发)
 }
 
 // dbgEnvItem 环境清单中的一项(取自 /api/settings 返回的完整配置)。
@@ -85,8 +86,9 @@ var debugTopentCmd = &cobra.Command{
 	Long: `查看或设置当前会话的 TOPENT(企业编号)override。
 
 无参数:显示当前会话所在环境/状态、会话内 TOPENT override 与配置级默认(该环境 db.ent)。
-带值:仅在会话空闲(idle)时可设置,下一轮调试启动时采用;值不限数字/文本,
-服务端会剔除两侧空白。--clear 等价于传空值:清除会话级 override,回退配置默认。
+带值:仅在会话空闲(idle)时可设置,服务端立即下发到会话 shell(不必等下一轮调试);
+值不限数字/文本,服务端会剔除两侧空白。--clear 等价于传空值:清除会话级 override,
+并重新下发配置默认(而非简单 unset,避免掉回选区的机器默认)。
 
 需要 tdebug serve 在运行且已有空闲会话(无会话时先 tdebug env <环境名> 连接)。`,
 	Example: `  tdebug topent          # 查看当前会话 TOPENT
@@ -312,7 +314,8 @@ func dbgTopentShow() error {
 	} else {
 		fmt.Println("会话内 TOPENT override: (未设置)")
 	}
-	fmt.Printf("配置级默认(该环境 db.ent): %s\n", orDefault(snap.TopentCfg, "(未配置,沿用登录默认)"))
+	fmt.Printf("配置级默认(该环境 db.ent): %s\n", orDefault(snap.TopentCfg, "(未配置:不覆写,沿用选区登录默认)"))
+	fmt.Printf("当前会话实际值(shell): %s\n", orDefault(snap.TopentShell, "(未取到)"))
 	return nil
 }
 
@@ -334,9 +337,9 @@ func dbgTopentSet(value string) error {
 		return err
 	}
 	if value == "" {
-		fmt.Println("已清除会话 TOPENT override(下一轮调试回退配置默认)")
+		fmt.Println("已清除会话 TOPENT override(已重新下发配置默认;配置为空才 unset)")
 	} else {
-		fmt.Printf("已设置会话 TOPENT = %q(下一轮调试生效)\n", value)
+		fmt.Printf("已设置会话 TOPENT = %q(已立即下发到会话)\n", value)
 	}
 	return nil
 }

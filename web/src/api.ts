@@ -66,7 +66,7 @@ export const api = {
   sessionRestart: (id: string) => req<{ sessionId: string; env?: string; state?: string }>(`/api/sessions/${id}/restart`, { method: 'POST' }),
   sessionClose: (id: string) => req<any>(`/api/sessions/${id}/close`, { method: 'POST' }),
   sessionSwitch: (env: string) => req<{ sessionId: string; env?: string; state?: string }>('/api/sessions/switch', { method: 'POST', body: JSON.stringify({ env }) }),
-  // 空闲态重新设置会话 TOPENT(空值 = 清除,回配置/登录默认)
+  // 空闲态重新设置会话 TOPENT(空值 = 清除覆盖并重新下发配置默认)
   topent: (id: string, value: string) => req<{ topent: string }>(`/api/sessions/${id}/topent`, { method: 'POST', body: JSON.stringify({ value }) }),
   bpAdd: (id: string, location: string) =>
     req<{ breakpoint: Breakpoint }>(`/api/sessions/${id}/breakpoints`, { method: 'POST', body: JSON.stringify({ location }) }),

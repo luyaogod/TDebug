@@ -2,7 +2,8 @@
 // 会话 = 与某 T100 环境的 SSH+登录态,debug 只是在其上跑一轮;结束调试/程序退出都只回空闲。
 // 本面板负责 切换(换到另一环境并重连)/ 重启(断开重连同环境)/ 结束(彻底释放连接);
 // 这些操作都会先结束当前 debug(由后端收口)。行只显示环境名 + 状态,保持精简。
-// 两个可折叠区域(仿 debug 运行区手风琴):「会话」(环境行列表)、「环境变量」(TOPENT 设置)。
+// 两个可折叠区域(仿 debug 运行区手风琴):「会话」(环境行列表)、
+// 「环境变量」(会话 TOPENT:连接后带出登录回读的实际值供参考,空闲时可覆盖)。
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { ArrowRightLeft, Check, RefreshCw, RotateCcw, Power } from 'lucide-react'
 import { useStore } from './store'
@@ -119,18 +120,30 @@ export function SessionPanel() {
     if (p) void runOp(p.op, p.env)
   }
 
-  // ---- 环境变量:TOPENT(会话内,仅 idle 可设置,下一轮调试生效) ----
+  // ---- 环境变量:TOPENT(会话内,仅 idle 可设置) ----
+  // topent = 会话内手动覆盖(空 = 未覆盖);topentShell = 当前会话实际值(后端在连接时
+  // 已把环境默认 TOPENT 下发到 shell,并同步回读值);topentCfg = 环境配置值。
+  // 未覆盖时把实际值直接显示在输入框里,让用户一眼看到当前连的是哪个 TOPENT,
+  // 需要时再手动改并保存。
   const [topent, setTopent] = useState('')
+  const [topentShell, setTopentShell] = useState('')
+  const [topentCfg, setTopentCfg] = useState('')
   const [topentSaved, setTopentSaved] = useState(false)
   const [topentErr, setTopentErr] = useState('')
   const canSetTopent = !!sessionId && state === 'idle' && !busy
+  // 依赖里必须带 state:会话先建好(sessionId 先到、state=loading),登录与 TOPENT 下发
+  // 完成后才有值;只在 sessionId 变化时取会拿到登录前的空值,面板就一直是空的。
   const loadTopent = useCallback(() => {
-    if (!sessionId || state !== 'idle') return
+    if (!sessionId) { setTopent(''); setTopentShell(''); setTopentCfg(''); return }
     void api.snapshot(sessionId).then((snap: any) => {
       setTopent(snap.topent || '')
+      setTopentShell(snap.topentShell || '')
+      setTopentCfg(snap.topentCfg || '')
     }).catch(() => {})
   }, [sessionId, state])
   useEffect(() => { loadTopent() }, [loadTopent])
+  // 输入框显示值:手动覆盖 > 登录回读的实际值 > 环境配置值(逐级兜底,避免出现空框)
+  const shownTopent = topent || topentShell || topentCfg
   const saveTopent = async () => {
     if (!canSetTopent || !sessionId) return
     // 不限数字/文本:仅剔除两侧空白,留空 = 清除手动设置
@@ -216,19 +229,35 @@ export function SessionPanel() {
             <div className="flex items-center gap-1.5 px-2 py-0.5">
               <span className="w-[52px] shrink-0 text-xs text-muted-foreground"
                 title="TOPENT(企业编号):T100 运行时的企业环境,作业运行与数据库连接以此为准">TOPENT</span>
-              <Input value={topent} disabled={!canSetTopent}
+              <Input value={shownTopent} disabled={!canSetTopent}
                 onChange={(e) => setTopent(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') void saveTopent() }}
-                title="数字或文本均可;保存时自动剔除两侧空白,留空 = 清除手动设置"
+                title="会话 TOPENT:未覆盖时显示当前会话实际值(连接时已按环境配置下发);改动后保存 = 设为会话覆盖,留空保存 = 清除覆盖(回环境默认)"
                 className="h-6 min-w-0 flex-1 px-1.5 font-mono text-xs" />
               <button disabled={!canSetTopent} onClick={() => void saveTopent()}
-                title="保存 TOPENT(下一轮调试启动时采用)"
+                title="保存 TOPENT(立即下发到当前会话)"
                 className={`flex h-6 shrink-0 items-center px-1.5 text-xs transition-colors disabled:pointer-events-none disabled:opacity-30 ${
                   topentSaved ? 'text-emerald-600 dark:text-emerald-400' : 'hover:bg-accent/60'
                 }`}>
                 {topentSaved ? <Check className="h-3.5 w-3.5" /> : '保存'}
               </button>
             </div>
+            {/* 标注显示值的来源:手动覆盖 / 连接时按配置下发的实际值 / 配置值兜底。
+                配置是默认值,连接时已下发;用户后续改配置则下一轮调试生效 —— 属正常行为,
+                不用告警色,只在两者确实不同时说一句。 */}
+            {!!sessionId && (
+              <div className="px-2.5 pb-1 text-[11px] text-muted-foreground">
+                {topent
+                  ? '会话覆盖值(已下发到当前会话)'
+                  : topentShell
+                    ? (topentCfg
+                      ? (topentCfg === topentShell
+                        ? '当前会话值(连接时已按环境配置下发)'
+                        : `当前会话值;环境配置已改为 ${topentCfg},下一轮调试生效`)
+                      : '当前会话值(环境未配置,沿用选区登录默认)')
+                    : (topentCfg ? '未取到实际值,显示的是环境配置值' : '未配置 TOPENT(可手动填写后保存)')}
+              </div>
+            )}
             {topentErr && <div className="px-2.5 pb-1 text-[11px] text-red-600 dark:text-red-400">{topentErr}</div>}
           </div>
         )}

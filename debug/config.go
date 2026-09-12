@@ -37,7 +37,7 @@ type Config struct {
 	envName string               // 当前环境名(会话选择/切换时写入;空=取 sshs 首条)
 	SSH     host.SSHConfig       `json:"-"` // 生效 SSH(envName 合并)
 	Zone    string               `json:"-"` // 生效登录区域
-	Topent  host.EntValue        `json:"-"` // 生效默认企业(调试会话 export TOPENT)
+	Topent  host.EntValue        `json:"-"` // 生效默认企业(连接会话即下发到 shell；会话内可覆盖)
 	DB      *dbconfig.Connection `json:"-"` // 生效数据库连接(该环境的 ssh.db 深拷贝;nil=该 ssh 未挂库)
 	Runtime *host.RuntimeEnv     `json:"-"` // 登录后动态获取的 T100 路径(探针/选区回显);nil=尚未获取,需登录探测
 }
@@ -74,9 +74,22 @@ func (c *Config) applySsh(e *host.NamedSsh) {
 }
 
 // ApplyDefaultEnv 把当前环境(envName;未确定时取 sshs 首条)的 SSH/zone/topent/库引用
-// 合并到运行时字段。无任何 ssh 时保持空(LoadConfig 已校验不允许)。
+// 合并到运行时字段。无任何 ssh 时(设置页可删空)清空当前环境,运行时字段保持为空。
 func (c *Config) ApplyDefaultEnv() {
-	if c.envName == "" && len(c.SSHs) > 0 {
+	// 环境可被删空(设置页保存走 hSettingsPut,不经 LoadConfig 的非空校验;
+	// 该接口现已拦下空列表,此处为兜底):清空当前环境与全部运行时合并结果。
+	// 只清 envName 不够 —— EnvName() 会用 c.SSH.Host+Zone 兜底拼出幽灵环境名,
+	// 且下面的回落分支会对空切片取下标 panic。
+	if len(c.SSHs) == 0 {
+		c.envName = ""
+		c.SSH = host.SSHConfig{}
+		c.Zone = ""
+		c.Topent = ""
+		c.DB = nil
+		c.Runtime = nil
+		return
+	}
+	if c.envName == "" {
 		c.envName = c.SSHs[0].Name
 	}
 	if c.envName == "" {

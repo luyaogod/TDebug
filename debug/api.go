@@ -307,6 +307,7 @@ func (s *Server) hSnapshot(w http.ResponseWriter, r *http.Request) {
 		"watchdogSeconds": s.cfg.WatchdogSeconds,
 		"topent":          sess.TopentOverride(),
 		"topentCfg":       sess.TopentCfg(),
+		"topentShell":     sess.TopentShell(),
 	})
 }
 
@@ -406,9 +407,9 @@ func (s *Server) hSessionRestart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "sessionId": ns.ID, "env": cfg.EnvName(), "state": "loading"})
 }
 
-// hTopent 空闲态重新设置 TOPENT(会话内,下一轮调试生效)。
+// hTopent 空闲态重新设置 TOPENT(会话内,立即下发到 shell)。
 // 仅允许 idle(宿主 shell 就绪、无调试运行);值不限数字/文本(导出为环境变量),
-// 服务端剔除两侧空白;留空 = 清除手动设置回到配置/登录默认。
+// 服务端剔除两侧空白;留空 = 清除手动覆盖并重新下发配置默认。
 func (s *Server) hTopent(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessOf(w, r)
 	if sess == nil {
@@ -1058,6 +1059,12 @@ func (s *Server) hSettingsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	var nc Config
 	if !readBody(w, r, &nc) {
+		return
+	}
+	// LoadConfig 要求至少一个环境(见 config.go),放行空列表会写出下次启动
+	// 直接加载失败的 config.json(服务起不来,只能手改文件),故在此拦下。
+	if len(nc.SSHs) == 0 {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": "至少需要保留一个服务器环境(设置-环境-SSH 页)"})
 		return
 	}
 	nc.DataDir = s.cfg.DataDir // 运行时注入字段,请求体不带

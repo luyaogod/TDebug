@@ -356,7 +356,7 @@ export function SettingsView() {
                           </button>
                         </div>
                       </Field>
-                      <Field label="TOPENT(默认企业;调试会话 export,数字或文本)" className="col-span-2"><Input className={cell} value={cur.topent} onChange={(e) => patchSsh(selSsh, { topent: e.target.value })} /></Field>
+                      <Field label="TOPENT(默认企业;连接会话即下发,数字或文本)" className="col-span-2"><Input className={cell} value={cur.topent} onChange={(e) => patchSsh(selSsh, { topent: e.target.value })} /></Field>
                       <p className="col-span-2 text-muted-foreground">
                         调试会话按该服务器登录(区域/TOPENT)。该环境的数据库连接在「数据库」Tab 维护(一对一)。
                       </p>

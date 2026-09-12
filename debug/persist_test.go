@@ -115,6 +115,15 @@ func TestTopentForRun(t *testing.T) {
 	if got := s.TopentCfg(); got != "7" {
 		t.Fatalf("TopentCfg 应返回配置值,got %q", got)
 	}
+	// TopentShell 取登录回读的 $TOPENT:与配置级 TopentCfg 是两个来源
+	// (连接会话不 export TOPENT,故"当前连的是哪个"以回读值为准)
+	if got := s.TopentShell(); got != "" {
+		t.Fatalf("未回读(无 Runtime)时 TopentShell 应为空,got %q", got)
+	}
+	c.Runtime = &host.RuntimeEnv{TOP: "/u1/t35prd", ERP: "/u1/t35prd/erp", Topent: " 13 "}
+	if got := s.TopentShell(); got != "13" {
+		t.Fatalf("TopentShell 应返回登录回读值并剔除空白,got %q", got)
+	}
 }
 
 func TestCloneEnvAndEnvName(t *testing.T) {
