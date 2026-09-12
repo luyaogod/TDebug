@@ -1,0 +1,31 @@
+{
+  "doc": "11_user-interface/2048-syntax-of-construct-instruction.md",
+  "about": "CONSTRUCT variable ON column-list FROM field-list 位置绑定形式",
+  "fixture": "construct-positional.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "qbe_pos",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 6,
+      "children": [
+        {
+          "name": "CONSTRUCT q_cust",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 5,
+          "children": [
+            {
+              "name": "BEFORE FIELD f1",
+              "kind": "Event",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

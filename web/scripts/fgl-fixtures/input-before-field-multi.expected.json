@@ -1,0 +1,45 @@
+{
+  "doc": "11_user-interface/1942-before-field-block.md",
+  "about": "BEFORE FIELD / ON CHANGE / AFTER FIELD 的逗号多字段列表",
+  "fixture": "input-before-field-multi.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "inp_fields",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 10,
+      "children": [
+        {
+          "name": "INPUT BY NAME g_cust",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 9,
+          "children": [
+            {
+              "name": "BEFORE FIELD cust_name, cust_addr, cust_zip",
+              "kind": "Event",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            },
+            {
+              "name": "ON CHANGE cust_name, cust_addr",
+              "kind": "Event",
+              "startLine": 5,
+              "endLine": 6,
+              "children": []
+            },
+            {
+              "name": "AFTER FIELD cust_zip",
+              "kind": "Event",
+              "startLine": 7,
+              "endLine": 8,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

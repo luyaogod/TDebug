@@ -68,7 +68,7 @@ Windows 一键打包（exe + config + README → dist/tddebug-portable.zip）：
 | `interrupt` | 中断运行中/卡住的程序，回到调试器 |
 | `env [环境名]` | 查看/切换当前生效的调试环境（SSH 配置） |
 | `topent [值]` | 查看/设置会话级 TOPENT override（`--clear` 清除） |
-| `wslogs` | 接口报文日志列表（`--service`、`--fail`、`--page`） |
+| `wslogs` | 接口报文日志列表（`--service`、`--server`、`--origin`、`--result`、`--from`/`--to`、`--fail`、`--page`；条件口径对齐 T100 原生 awsq990） |
 | `wsdebug <rowid>` | 按日志报文参数重放调试，停在入口 |
 | `db [--ent N]` | 数据库连接探查：企业(TOPENT) → 账号映射与连接验证 |
 | `probe` | 协议驱动器自检尖刺：登录→启动→下断点→步进→求值（`-m/-p/-l`） |

@@ -1,0 +1,8 @@
+{
+  "doc": "08_language-basics/0780-interface.md",
+  "about": "INTERFACE 跟在 TYPE Name 之后时它不在行首，但仍是跨多行的 INTERFACE 块，应当产出折叠区",
+  "fixture": "fold-interface-typed.4gl",
+  "note": "行号 0-based。0780 自己的示例就是 `TYPE Shape INTERFACE` 开头、`END INTERFACE` 收尾（0781-interface-usage.md 里同一写法）。",
+  "nodes": [],
+  "folds": [[1, 4]]
+}

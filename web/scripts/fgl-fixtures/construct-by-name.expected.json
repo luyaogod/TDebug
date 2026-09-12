@@ -1,0 +1,38 @@
+{
+  "doc": "11_user-interface/2048-syntax-of-construct-instruction.md",
+  "about": "CONSTRUCT BY NAME variable ON column-list 形式",
+  "fixture": "construct-by-name.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "qbe_name",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 8,
+      "children": [
+        {
+          "name": "CONSTRUCT BY NAME q_cust",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 7,
+          "children": [
+            {
+              "name": "BEFORE CONSTRUCT",
+              "kind": "Event",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            },
+            {
+              "name": "AFTER FIELD cust_name",
+              "kind": "Event",
+              "startLine": 5,
+              "endLine": 6,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "doc": "08_language-basics/0546-whitespace-separators.md",
+  "about": "单行块不产出折叠区：第 4 行的 IF … END IF 写在同一行，只有 FUNCTION 一个折叠区",
+  "fixture": "fold-single-line-block.4gl",
+  "note": "行号 0-based。0546 明确 BDL 与 C/Pascal 一样是自由格式、忽略 LINEFEED，所以同一行写完整个 IF 是合法的。",
+  "nodes": [
+    { "name": "f_oneline_if", "kind": "Function", "startLine": 2, "endLine": 6, "children": [] }
+  ],
+  "folds": [[2, 6]]
+}

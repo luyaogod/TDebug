@@ -1,0 +1,15 @@
+{
+  "doc": "11_user-interface/2078-syntax-of-the-procedural-dialog-instruction.md",
+  "about": "两类折叠区重叠：FUNCTION（块树）+ DIALOG（块树）与 IF（FOLD_ONLY）同时存在、互不重复",
+  "fixture": "fold-overlap.4gl",
+  "note": "行号 0-based。三层的起止两两不同，任何一层缺失或重复都会被普通比对抓到。",
+  "nodes": [
+    {
+      "name": "f_overlap", "kind": "Function", "startLine": 2, "endLine": 8,
+      "children": [
+        { "name": "DIALOG", "kind": "Interface", "startLine": 4, "endLine": 6, "children": [] }
+      ]
+    }
+  ],
+  "folds": [[4, 6], [3, 7], [2, 8]]
+}

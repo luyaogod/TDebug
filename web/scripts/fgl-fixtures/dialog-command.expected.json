@@ -1,0 +1,46 @@
+{
+  "doc": "11_user-interface/2078-syntax-of-the-procedural-dialog-instruction.md",
+  "about": "dialog-control-block 的 COMMAND / COMMAND KEY 形式",
+  "fixture": "dialog-command.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "deviation": "DIALOG 的 COMMAND / COMMAND KEY 控制块未被识别。文档 2078 明确把它列为 dialog-control-block，但在 MENU 里 COMMAND 是 menu-option（叶子），两处语义不同 —— name 形态与是否该建节点需要人定。",
+  "nodes": [
+    {
+      "name": "cmd_dlg",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 8,
+      "children": [
+        {
+          "name": "DIALOG",
+          "kind": "Interface",
+          "startLine": 2,
+          "endLine": 7,
+          "children": [
+            {
+              "name": "INPUT BY NAME g_cust",
+              "kind": "Object",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            },
+            {
+              "name": "COMMAND \"Apply\"",
+              "kind": "Event",
+              "startLine": 5,
+              "endLine": 5,
+              "children": []
+            },
+            {
+              "name": "COMMAND KEY (F2) \"Print\"",
+              "kind": "Event",
+              "startLine": 6,
+              "endLine": 6,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

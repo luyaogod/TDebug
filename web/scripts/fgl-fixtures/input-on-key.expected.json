@@ -1,0 +1,31 @@
+{
+  "doc": "11_user-interface/1948-on-key-block.md",
+  "about": "ON KEY ( key-name [,...] ) 键名列表形式",
+  "fixture": "input-on-key.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "inp_key",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 6,
+      "children": [
+        {
+          "name": "INPUT BY NAME g_cust",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 5,
+          "children": [
+            {
+              "name": "ON KEY (F1, Control-z)",
+              "kind": "Event",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

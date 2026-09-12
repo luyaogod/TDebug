@@ -1,0 +1,10 @@
+{
+  "doc": "08_language-basics/0717-record.md",
+  "about": "一行式 `x RECORD LIKE t.*` 不是 RECORD 块开头：折叠区只能落在第 3 行的 DEFINE … RECORD 上",
+  "fixture": "fold-record-oneline.4gl",
+  "note": "行号 0-based。若第 4 行被误当块开头，第 6 行的 END RECORD 就会弹出它，折叠区变成 [4,6]。",
+  "nodes": [
+    { "name": "f_oneline", "kind": "Function", "startLine": 2, "endLine": 8, "children": [] }
+  ],
+  "folds": [[3, 6], [2, 8]]
+}

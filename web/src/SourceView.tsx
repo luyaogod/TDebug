@@ -10,6 +10,7 @@ import 'monaco-editor/esm/vs/base/browser/ui/codicons/codiconStyles.js'
 import { useStore } from './store'
 import { cn } from './lib/utils'
 import { attachHover } from './fglHover'
+import { FGL_MONARCH } from './fglTokens'
 
 export const editorRef = { current: null as monaco.editor.IStandaloneCodeEditor | null }
 
@@ -20,57 +21,17 @@ function setupMonaco() {
   self.MonacoEnvironment = { getWorker: () => new editorWorker() }
   loader.config({ monaco })
   monaco.languages.register({ id: '4gl' })
-  monaco.languages.setMonarchTokensProvider('4gl', {
-    keywords: [
-      'main', 'function', 'return', 'if', 'then', 'else', 'elif', 'for', 'to', 'step',
-      'while', 'case', 'when', 'otherwise', 'define', 'record', 'array', 'dynamic', 'like',
-      'type', 'constant', 'let', 'call', 'display', 'input', 'construct', 'by', 'name',
-      'on', 'from', 'menu', 'command', 'continue', 'exit', 'next', 'field', 'before',
-      'after', 'row', 'key', 'options', 'defer', 'interrupt', 'whenever', 'error',
-      'warning', 'open', 'window', 'form', 'close', 'current', 'dialog', 'attributes',
-      'unbuffered', 'without', 'defaults', 'accept', 'cancel', 'insert', 'delete',
-      'update', 'select', 'foreach', 'execute', 'immediate', 'prepare', 'declare',
-      'fetch', 'free', 'rollback', 'work', 'commit', 'run', 'sleep', 'import', 'fgl',
-      'public', 'private', 'returns', 'returning', 'null', 'true', 'false', 'not', 'and',
-      'or', 'is', 'in', 'goto', 'label', 'end',
-    ],
-    typeKeywords: ['integer', 'int', 'smallint', 'char', 'varchar', 'string', 'decimal', 'date', 'datetime', 'interval', 'byte', 'text', 'boolean', 'float', 'smallfloat', 'money'],
-    tokenizer: {
-      root: [
-        [/#.*$/, 'comment'],
-        [/--.*$/, 'comment'],
-        [/"/, { token: 'string', next: '@string' }],
-        [/'/, { token: 'string', next: '@sstring' }],
-        [/[a-zA-Z_][\w]*/, {
-          cases: {
-            '@keywords': 'keyword',
-            '@typeKeywords': 'type',
-            '@default': 'identifier',
-          },
-        }],
-        [/\d+(\.\d+)?/, 'number'],
-        [/[()[\],.:=+\-*/|<>]/, 'delimiter'],
-      ],
-      string: [
-        [/[^"]/, 'string'],
-        [/"/, { token: 'string', next: '@pop' }],
-      ],
-      sstring: [
-        [/[^']/, 'string'],
-        [/'/, { token: 'string', next: '@pop' }],
-      ],
-    },
-  } as any)
+  // 4GL 高亮定义移植自 BDL 扩展(见 fglTokens.ts):只发 comment/string/keyword 三类 token
+  monaco.languages.setMonarchTokensProvider('4gl', FGL_MONARCH)
   monaco.editor.defineTheme('tdebug-dark', {
     base: 'vs-dark',
     inherit: true,
-    // 语法配色对齐 VS Code Dark Modern 默认主题
+    // 语法配色对齐 VS Code Dark Modern 默认主题;只列三类,与 tokenizer 一一对应
+    // (数字/标识符/括号改为继承主题默认前景色,类型关键字并入 keyword 蓝)
     rules: [
       { token: 'keyword', foreground: '569cd6' },
-      { token: 'type', foreground: '4ec9b0' },
       { token: 'comment', foreground: '6a9955' },
       { token: 'string', foreground: 'ce9178' },
-      { token: 'number', foreground: 'b5cea8' },
     ],
     colors: {
       'editor.background': '#1f1f1f',
@@ -86,10 +47,8 @@ function setupMonaco() {
     // 语法配色对齐 VS Code Light Modern 默认主题
     rules: [
       { token: 'keyword', foreground: '0000ff' },
-      { token: 'type', foreground: '267f99' },
       { token: 'comment', foreground: '008000' },
       { token: 'string', foreground: 'a31515' },
-      { token: 'number', foreground: '098658' },
     ],
     colors: {
       'editor.background': '#ffffff',
@@ -296,6 +255,11 @@ export function SourceView() {
       renderLineHighlight: 'none' as const,
       lineNumbersMinChars: 5,
       folding: false,
+      // 对齐 BDL 的「只三种颜色」:下面两项在 Monaco 里的默认值都会引入第四种颜色 ——
+      // 括号配色独立于 tokenizer,中文源码里的全角空格会被画框(BDL 侧用
+      // configurationDefaults 关掉的是同样的两项)。
+      bracketPairColorization: { enabled: false },
+      unicodeHighlight: { ambiguousCharacters: false },
       automaticLayout: true,
       fixedOverflowWidgets: true, // 悬浮卡片越界时改挂 fixed 容器,避免被编辑器裁剪
       scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },

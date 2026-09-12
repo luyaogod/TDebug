@@ -1,0 +1,11 @@
+{
+  "doc": "08_language-basics/0547-string-delimiters.md",
+  "about": "跨行字符串字面量：第 4/5 行是字符串续行（行尾 CRLF），行首的 IF x THEN / END IF 属于字符串内容，不参与配对也不换行",
+  "fixture": "fold-string-multiline.4gl",
+  "note": "行号 0-based。0547：『A string literal can be written on multiple lines. The compiler merges lines by removing the newline character.』—— 所以第 4/5 行是合法续行。真正的 IF 在第 2 行、END IF 在第 6 行。",
+  "eol": { "lf": 8, "crlf": 2, "loneCr": 0, "finalNewline": true },
+  "nodes": [
+    { "name": "f_mlstr", "kind": "Function", "startLine": 1, "endLine": 7, "children": [] }
+  ],
+  "folds": [[2, 6], [1, 7]]
+}

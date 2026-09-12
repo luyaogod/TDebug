@@ -1,0 +1,31 @@
+{
+  "doc": "11_user-interface/1932-syntax-of-the-input-instruction.md",
+  "about": "INPUT {variable|record.*} FROM field-list 的位置绑定形式",
+  "fixture": "input-from-fields.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "inp_pos",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 6,
+      "children": [
+        {
+          "name": "INPUT r_cust",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 5,
+          "children": [
+            {
+              "name": "BEFORE INPUT",
+              "kind": "Event",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "doc": "08_language-basics/0780-interface.md",
+  "about": "FOLD_ONLY 正例：裸 INTERFACE … END INTERFACE 产出折叠区",
+  "fixture": "fold-interface.4gl",
+  "note": "行号 0-based。期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [],
+  "folds": [[1, 4]]
+}

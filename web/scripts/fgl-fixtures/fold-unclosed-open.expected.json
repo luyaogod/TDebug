@@ -1,0 +1,10 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "未配对的开头：第 2 行的 IF 永不闭合 → 无折叠区；它既要放过 FOR 的配对，也不能把第 7 行的 IF 配到自己身上",
+  "fixture": "fold-unclosed-open.4gl",
+  "note": "行号 0-based。期望值由 BDL 官方文档推导，非实现输出快照。逐块独立成栈就是为这条性质服务的。",
+  "nodes": [
+    { "name": "f_unclosed", "kind": "Function", "startLine": 1, "endLine": 10, "children": [] }
+  ],
+  "folds": [[4, 6], [7, 9], [1, 10]]
+}

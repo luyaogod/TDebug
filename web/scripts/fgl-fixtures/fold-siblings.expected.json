@@ -1,0 +1,10 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "同级连续：两个相邻 IF 各折各的，不能跨块配成一个 [2,7] 的大折叠区",
+  "fixture": "fold-siblings.4gl",
+  "note": "行号 0-based。期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    { "name": "f_siblings", "kind": "Function", "startLine": 1, "endLine": 8, "children": [] }
+  ],
+  "folds": [[2, 4], [5, 7], [1, 8]]
+}

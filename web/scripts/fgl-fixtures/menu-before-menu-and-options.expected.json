@@ -1,0 +1,60 @@
+{
+  "doc": "11_user-interface/1906-syntax-of-the-menu-instruction.md / 1914-before-menu-block.md",
+  "about": "BEFORE MENU 控制块；COMMAND 是 MENU 的 menu-option，与 ON ACTION / ON IDLE / ON TIMER 平级",
+  "fixture": "menu-before-menu-and-options.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "deviation": "原期望把 COMMAND 当作「不建节点的叶子」。现已改为**建节点**（Event，标签取 option-name）：理由有两条 —— ① 文档 1906 里 COMMAND 与 ON ACTION/ON IDLE/ON TIMER 同属 menu-option，本实现已把后三者建成节点，只把 COMMAND 排除并不自洽；② COMMAND 不成为边界时，它前面的 `BEFORE MENU` 会一路吞到下一个被认出的子块，把整段菜单项包进自己的范围（本用例修复前 BEFORE MENU 的 endLine 是 6 而不是 4）。标签只取 option-name（`COMMAND \"Quit\"`），不含 option-comment 与 HELP 子句。",
+  "nodes": [
+    {
+      "name": "m_opts",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 14,
+      "children": [
+        {
+          "name": "MENU \"Main\"",
+          "kind": "Namespace",
+          "startLine": 2,
+          "endLine": 13,
+          "children": [
+            {
+              "name": "BEFORE MENU",
+              "kind": "Event",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            },
+            {
+              "name": "COMMAND \"Quit\"",
+              "kind": "Event",
+              "startLine": 5,
+              "endLine": 6,
+              "children": []
+            },
+            {
+              "name": "ON ACTION refresh",
+              "kind": "Event",
+              "startLine": 7,
+              "endLine": 8,
+              "children": []
+            },
+            {
+              "name": "ON IDLE 3",
+              "kind": "Event",
+              "startLine": 9,
+              "endLine": 10,
+              "children": []
+            },
+            {
+              "name": "ON TIMER 2",
+              "kind": "Event",
+              "startLine": 11,
+              "endLine": 12,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

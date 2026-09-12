@@ -1,0 +1,73 @@
+{
+  "doc": "11_user-interface/1968-on-fill-buffer-block.md / 1988 / 1989 / 1984-1987",
+  "about": "DISPLAY ARRAY 的 ON FILL BUFFER / ON SELECTION CHANGE / ON SORT / ON APPEND|INSERT|UPDATE|DELETE",
+  "fixture": "display-array-fill-buffer-sort.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "da_a",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 18,
+      "children": [
+        {
+          "name": "DISPLAY ARRAY arr",
+          "kind": "Array",
+          "startLine": 2,
+          "endLine": 17,
+          "children": [
+            {
+              "name": "ON FILL BUFFER",
+              "kind": "Event",
+              "startLine": 3,
+              "endLine": 4,
+              "children": []
+            },
+            {
+              "name": "ON SELECTION CHANGE",
+              "kind": "Event",
+              "startLine": 5,
+              "endLine": 6,
+              "children": []
+            },
+            {
+              "name": "ON SORT",
+              "kind": "Event",
+              "startLine": 7,
+              "endLine": 8,
+              "children": []
+            },
+            {
+              "name": "ON APPEND",
+              "kind": "Event",
+              "startLine": 9,
+              "endLine": 10,
+              "children": []
+            },
+            {
+              "name": "ON INSERT",
+              "kind": "Event",
+              "startLine": 11,
+              "endLine": 12,
+              "children": []
+            },
+            {
+              "name": "ON UPDATE",
+              "kind": "Event",
+              "startLine": 13,
+              "endLine": 14,
+              "children": []
+            },
+            {
+              "name": "ON DELETE",
+              "kind": "Event",
+              "startLine": 15,
+              "endLine": 16,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

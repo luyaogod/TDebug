@@ -305,12 +305,14 @@ export function DatePicker({ value, onChange, className, title, placeholder = '�
 
 // ---- Table(shadcn 规范,对齐 TbmLite 的可编辑表格):单元格自带网格线,控件嵌在格内 ----
 // 表格容器横向可滚;TableHead/TableCell 带 border 形成 Excel 式网格(零圆角由 index.css 统一)。
-export function Table({ className, ...props }: React.ComponentProps<'table'>) {
-  return (
-    <div className="relative w-full overflow-x-auto">
-      <table className={cn('w-full caption-bottom border-collapse text-sm', className)} {...props} />
-    </div>
-  )
+// container=false 供「需要表头 sticky」的列表使用:外层 overflow-x-auto 的 div 按 CSS 规则
+// 会让 overflow-y 也算成非 visible,于是它成了新的滚动祖先,里层 th 的 sticky 就失效了
+// (滚动容器改由调用方提供)。默认仍套容器,不影响既有网格表格。
+export function Table({ className, container = true, ...props }:
+  React.ComponentProps<'table'> & { container?: boolean }) {
+  const table = <table className={cn('w-full caption-bottom border-collapse text-sm', className)} {...props} />
+  if (!container) return table
+  return <div className="relative w-full overflow-x-auto">{table}</div>
 }
 
 export function TableHeader({ className, ...props }: React.ComponentProps<'thead'>) {

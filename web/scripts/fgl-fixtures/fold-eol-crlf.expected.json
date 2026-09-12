@@ -1,0 +1,11 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "行尾边界·纯 CRLF：行尾的 \\r 被剥掉后不得影响行号（extension.ts 注释说本仓库源码 100% CRLF，这是主场景）",
+  "fixture": "fold-eol-crlf.4gl",
+  "note": "行号 0-based。与 fold-eol-lf 的行号完全相同，二者只差字节。",
+  "eol": { "lf": 6, "crlf": 6, "loneCr": 0, "finalNewline": true },
+  "nodes": [
+    { "name": "f_eol", "kind": "Function", "startLine": 1, "endLine": 5, "children": [] }
+  ],
+  "folds": [[2, 4], [1, 5]]
+}

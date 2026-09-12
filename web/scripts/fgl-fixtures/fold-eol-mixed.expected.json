@@ -1,0 +1,11 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "行尾边界·混合行尾：同一文件里 CRLF 与 LF 交替，任何一条都不构成额外换行",
+  "fixture": "fold-eol-mixed.4gl",
+  "note": "行号 0-based。第 1/3/5 行（0-based）是 CRLF，其余是 LF。",
+  "eol": { "lf": 6, "crlf": 3, "loneCr": 0, "finalNewline": true },
+  "nodes": [
+    { "name": "f_eol", "kind": "Function", "startLine": 1, "endLine": 5, "children": [] }
+  ],
+  "folds": [[2, 4], [1, 5]]
+}

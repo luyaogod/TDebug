@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { api, type Event, type StopInfo, type Breakpoint, type Frame, type VarItem, type WSLogItem, type WSLogContent, type WSTestResult } from './api'
+import { api, httpStatusText, type Event, type StopInfo, type Breakpoint, type Frame, type VarItem, type WSLogItem, type WSLogContent, type WSLogQuery, type WSTestResult } from './api'
 
 // timeline 条目(人/AI/系统 的操作与事件,可审计)
 export interface TimelineItem {
@@ -69,7 +69,17 @@ interface Store {
   wsTestResult: WSTestResult | null
   wsTestRunning: boolean
   wsTestErr: string
-  wsTestHistory: { time: string; url: string; httpCode: number; durationSec: number; response: string }[]
+  // 服务测试日志(测试页常驻表格的行):原生 awsq990 用内存数组 g_wsfa2_d 记录,
+  // 不落库、刷新即清空;这里保留该语义,另存请求报文以便点击行回填。
+  wsTestHistory: {
+    at: string          // 起始时间 yyyy-MM-dd HH:mm:ss(记调用发起时刻)
+    url: string         // 目标地址(空 = 后端按当前环境推导的默认地址)
+    httpCode: number    // 0 = 未拿到响应
+    result: string      // 运行结果:HTTP 状态描述(OK/Not Found…);无响应时为错误文本
+    durationSec: number
+    body: string        // 该次请求报文(点击行回填请求区)
+    response: string
+  }[]
   wsLogs: WSLogItem[]
   wsLogsLoading: boolean
   wsLogsPage: number
@@ -114,8 +124,9 @@ interface Store {
   calibrate: () => Promise<void>
   setWsTest: (p: { mode?: string; url?: string; body?: string; soap?: boolean; result?: WSTestResult | null }) => void
   runWsTest: () => Promise<void>
-  loadWsLogs: (service: string, onlyFail: boolean, page?: number, startFrom?: string, startTo?: string) => Promise<void>
+  loadWsLogs: (q: WSLogQuery) => Promise<void>
   selectWsLog: (item: WSLogItem) => Promise<void>
+  prefetchWsLog: (item: WSLogItem) => void
   setWsLogTab: (t: 'info' | 'request' | 'response') => void
   closeWsLogDetail: () => void
   replayDebug: (item: WSLogItem) => Promise<void>
@@ -154,6 +165,31 @@ function jumpToMain(set: (p: Partial<Store>) => void, get: () => Store) {
   for (let i = 0; i < lines.length; i++) {
     if (/^\s*MAIN\b/i.test(lines[i])) { set({ currentLine: i + 1 }); break }
   }
+}
+
+// 接口日志报文缓存(模块级,不进 store state:预取成功不该触发重渲染)。
+// 一次 rowid 的报文内容(= 请求 + 响应)不会再变(同一次调用的流水),故只增不减即可,
+// 仅保留最近 N 条防内存无界。
+const WSLOG_CACHE_MAX = 30
+const wsLogContentCache = new Map<string, WSLogContent>()
+// 在途请求合并:同一 rowid 并发点击/预取只发一次(否则悬停+点击会打两次 SSH+sqlplus)
+const wsLogContentInflight = new Map<string, Promise<WSLogContent>>()
+
+function loadWsLogContent(item: WSLogItem): Promise<WSLogContent> {
+  const hit = wsLogContentCache.get(item.rowid)
+  if (hit) return Promise.resolve(hit)
+  const flying = wsLogContentInflight.get(item.rowid)
+  if (flying) return flying
+  const p = api.wsLogContent(item.rowid).then(({ content }) => {
+    wsLogContentCache.set(item.rowid, content)
+    if (wsLogContentCache.size > WSLOG_CACHE_MAX) {
+      const oldest = wsLogContentCache.keys().next().value
+      if (oldest) wsLogContentCache.delete(oldest)
+    }
+    return content
+  }).finally(() => { wsLogContentInflight.delete(item.rowid) })
+  wsLogContentInflight.set(item.rowid, p)
+  return p
 }
 
 export const useStore = create<Store>((set, get) => ({
@@ -409,18 +445,25 @@ export const useStore = create<Store>((set, get) => ({
 
   runWsTest: async () => {
     const st = get()
+    // 起始时间取调用发起时刻(原生在调用结束后才打戳;列名叫"起始时间",此处按列名语义取值)
+    const d = new Date()
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    const at = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
     set({ wsTestRunning: true, wsTestErr: '' })
     try {
       const { result } = await api.wsTest(st.wsTestMode, st.wsTestUrl, st.wsTestBody, st.wsTestSoap)
       set({ wsTestResult: result })
-      if (result.httpCode > 0) {
-        const entry = {
-          time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-          url: st.wsTestUrl || '(默认地址)',
-          httpCode: result.httpCode, durationSec: result.durationSec, response: result.response,
-        }
-        set((s) => ({ wsTestHistory: [entry, ...s.wsTestHistory].slice(0, 10) }))
+      // 每次都记一行(含请求失败/无响应:httpCode=0,运行结果记错误文本;原生 CATCH 分支同样会记一行)
+      const entry = {
+        at,
+        url: st.wsTestUrl || '(默认地址)',
+        httpCode: result.httpCode,
+        result: httpStatusText(result.httpCode, result.error),
+        durationSec: result.durationSec,
+        body: st.wsTestBody,
+        response: result.response,
       }
+      set((s) => ({ wsTestHistory: [entry, ...s.wsTestHistory].slice(0, 50) }))
     } catch (e: any) {
       set({ wsTestErr: e.message || String(e) })
     } finally {
@@ -428,11 +471,11 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
-  loadWsLogs: async (service, onlyFail, page = 1, startFrom = '', startTo = '') => {
+  loadWsLogs: async (q: WSLogQuery) => {
     set({ wsLogsLoading: true, wsLogErr: '' })
     try {
-      const r = await api.wsLogs(service.trim(), onlyFail, page, startFrom, startTo)
-      set({ wsLogs: r.items || [], wsLogsHasMore: !!r.hasMore, wsLogsPage: page, wsLogSel: null, wsLogContent: null })
+      const r = await api.wsLogs(q)
+      set({ wsLogs: r.items || [], wsLogsHasMore: !!r.hasMore, wsLogsPage: q.page ?? 1, wsLogSel: null, wsLogContent: null })
     } catch (e: any) {
       set({ wsLogErr: e.message || String(e), wsLogs: [] })
     } finally {
@@ -440,14 +483,30 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
+  // 点击行即取报文(接口一次返回 request+response,不是切页签才取)。
+  // 命中预取缓存时瞬时显示;同一行的并发请求会被合并(见 loadWsLogContent)。
   selectWsLog: async (item) => {
-    set({ wsLogSel: item, wsLogContent: null, wsLogErr: '' })
+    const cached = wsLogContentCache.get(item.rowid)
+    set({ wsLogSel: item, wsLogContent: cached ?? null, wsLogErr: '' })
+    if (cached) return
     try {
-      const { content } = await api.wsLogContent(item.rowid)
-      set({ wsLogContent: content })
+      const content = await loadWsLogContent(item)
+      // 期间可能已切到别的行:只在仍是当前选中时写回
+      if (get().wsLogSel?.rowid === item.rowid) set({ wsLogContent: content })
     } catch (e: any) {
-      set({ wsLogErr: e.message || String(e) })
+      if (get().wsLogSel?.rowid === item.rowid) set({ wsLogErr: e.message || String(e) })
     }
+  },
+
+  // 悬停预取:鼠标在行上停留一小会儿就开始取报文,等真点下去时通常已经就绪。
+  // 已缓存/在途则直接返回,不产生重复请求。
+  prefetchWsLog: (item) => {
+    if (wsLogContentCache.has(item.rowid) || wsLogContentInflight.has(item.rowid)) return
+    void loadWsLogContent(item)
+      .then((content) => {
+        if (get().wsLogSel?.rowid === item.rowid) set({ wsLogContent: content })
+      })
+      .catch(() => { /* 预取失败不打扰用户:真点下去时会再报错 */ })
   },
 
   setWsLogTab: (t) => set({ wsLogTab: t }),

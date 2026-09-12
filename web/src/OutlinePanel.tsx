@@ -1,5 +1,6 @@
-// 大纲面板:解析当前显示的 4GL 源码(FUNCTION/MAIN + DIALOG/CONSTRUCT/INPUT/INPUT ARRAY 及其子块),
-// 树形展示并点击跳行。跳转直接操作编辑器视口(setPosition + revealLineInCenterIfOutsideViewport),
+// 大纲面板:解析当前显示的 4GL 源码为块树(顶层 FUNCTION/MAIN/REPORT,其下 DIALOG/MENU/
+// INPUT/DISPLAY ARRAY/CONSTRUCT,再下 BEFORE/AFTER/ON… 子块;解析逻辑移植自 BDL,见 fgloutline.ts),
+// 树形展示并点击跳行(落到名称列)。跳转直接操作编辑器视口(setPosition + revealLineInCenterIfOutsideViewport),
 // 不走 revealReq——不受"仅停站可定位"的调试门限制,运行中也可浏览跳转,且不产生任何调试信号。
 // 调试页行号需补偿 lineOffset(Monaco 顶部前插空行对齐 DVM 行号)。
 // 高亮跟随编辑器光标:定位光标所在的最深层节点;若其上级被折叠,则高亮可见的那个祖先节点,
@@ -11,35 +12,27 @@ import { editorRef } from './SourceView'
 import { parseOutline, type OutlineNode } from './fgloutline'
 
 // 节点 key 由 path+行+label 决定,行渲染、折叠集合、全量收集共用同一算法
-const nodeKey = (node: OutlineNode, path: string) => `${path}/${node.line}:${node.label}`
+// (只用到行号与标签,故不绑定完整 OutlineNode —— 索引层是它的子集)
+const nodeKey = (node: { label: string; line: number }, path: string) => `${path}/${node.line}:${node.label}`
 
-// 带文档序索引的节点:end = 大纲覆盖到的源码行(含)= 先序遍历中本子树之后下一个节点的 line-1
+// 带文档序索引的节点:end = 解析器给出的真实块结束行(含),不再靠「先序下一个节点行号-1」反推
+// —— 后者在末尾节点与块之间穿插的普通语句处都不准。
 interface IndexedNode {
   label: string
   line: number
-  ord: number
-  sub: number // 子树节点总数(含自身)
   end: number
+  selStart: number // 名称列(0-based),点击落点
   children?: IndexedNode[]
 }
 
-function indexTree(roots: OutlineNode[], totalLines: number): { rooted: IndexedNode[]; list: IndexedNode[] } {
-  const list: IndexedNode[] = []
-  const walk = (nodes: OutlineNode[]): IndexedNode[] =>
-    nodes.map((n) => {
-      const node: IndexedNode = { label: n.label, line: n.line, ord: list.length, sub: 1, end: 0 }
-      list.push(node)
-      const kids = n.children ? walk(n.children) : undefined
-      node.children = kids
-      node.sub = 1 + (kids ? kids.reduce((s, k) => s + k.sub, 0) : 0)
-      return node
-    })
-  const rooted = walk(roots)
-  for (const node of list) {
-    const next = list[node.ord + node.sub]
-    node.end = (next ? next.line : totalLines + 1) - 1
-  }
-  return { rooted, list }
+function indexTree(roots: OutlineNode[], totalLines: number): IndexedNode[] {
+  return roots.map((n) => ({
+    label: n.label,
+    line: n.line,
+    end: Math.min(n.endLine, totalLines),
+    selStart: n.selStart,
+    children: n.children ? indexTree(n.children, totalLines) : undefined,
+  }))
 }
 
 // 光标行 → 从根到最深包含节点的链(区间互斥且按行有序,逐层线性扫描即可)
@@ -74,8 +67,9 @@ export function OutlinePanel() {
   const isDebug = !active
   const content = isDebug ? (sourceContent || '') : (active!.content || '')
   const offset = isDebug ? lineOffset : 0
-  const totalLines = useMemo(() => content.split('\n').length, [content])
-  const { rooted } = useMemo(() => indexTree(parseOutline(content), totalLines), [content, totalLines])
+  // 行数与解析器、Monaco 用同一套行模型(含孤立 \r 也算断行)
+  const totalLines = useMemo(() => content.split(/\r\n|\r|\n/).length, [content])
+  const rooted = useMemo(() => indexTree(parseOutline(content), totalLines), [content, totalLines])
   // 折叠集合:默认全展开;key 与渲染行共用 nodeKey 算法
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const allKeys = useMemo(() => {
@@ -131,11 +125,12 @@ export function OutlinePanel() {
     hlRef.current?.scrollIntoView({ block: 'nearest' })
   }, [visibleKey])
 
-  const jump = (line: number) => {
+  const jump = (line: number, col: number) => {
     const ed = editorRef.current
     if (!ed) return
     const L = line + offset
-    ed.setPosition({ lineNumber: L, column: 1 })
+    // 落在名称列上(selectionRange 语义),而不是一律行首
+    ed.setPosition({ lineNumber: L, column: col + 1 })
     ed.revealLineInCenterIfOutsideViewport(L)
   }
   const toggleKey = (key: string) => {
@@ -155,7 +150,7 @@ export function OutlinePanel() {
     const hl = key === visibleKey
     return (
       <div key={key}>
-        <div ref={hl ? hlRef : undefined} onClick={() => jump(node.line)}
+        <div ref={hl ? hlRef : undefined} onClick={() => jump(node.line, node.selStart)}
           className={`flex h-6 cursor-pointer items-center gap-1 pr-2 text-xs ${
             hl ? 'bg-accent/70 text-foreground' : 'hover:bg-accent/40'
           } ${hl ? '' : depth === 0 ? 'font-medium text-foreground' : depth === 1 ? 'text-sky-600 dark:text-sky-400' : 'text-muted-foreground'}`}
@@ -182,7 +177,7 @@ export function OutlinePanel() {
       <div className="flex h-8 shrink-0 items-center justify-between border-b border-border px-2.5">
         <span className="text-xs font-medium text-muted-foreground">大纲</span>
         <div className="flex items-center gap-1.5">
-          <span className="text-[11px] text-muted-foreground">{rooted.length} 个函数</span>
+          <span className="text-[11px] text-muted-foreground">{rooted.length} 个顶层节点</span>
           <button title={allExpanded ? '全部折叠' : '全部展开'} onClick={toggleAll}
             disabled={allKeys.length === 0}
             className="p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40">
@@ -192,7 +187,7 @@ export function OutlinePanel() {
       </div>
       <div className="min-h-0 flex-1 overflow-auto py-1">
         {rooted.length === 0 && (
-          <div className="p-2 text-xs text-muted-foreground">当前源码无可识别的函数/交互块</div>
+          <div className="p-2 text-xs text-muted-foreground">当前源码无可识别的大纲节点</div>
         )}
         {rooted.map((n) => row(n, 0, ''))}
       </div>

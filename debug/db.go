@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"tdebug/dbconfig"
@@ -88,11 +89,38 @@ func acctConnStr(c *dbconfig.Connection, account string) string {
 }
 
 // resolveDBRun 解析当前生效连接并探测服务器工具路径;未挂库返回错误
+// 客户端路径探测结果缓存:ProbeDBEnv/ProbeKsqlPath 都要在服务器上 source T100 环境
+// (一次 SSH exec,秒级),而结果只与 主机+账号+区域+库类型 有关。
+// 接口日志这类"每次点击都查一次库"的路径上,省掉这次探测是最大的一笔开销。
+// 与 Manager.envCache 同风格:互斥 + TTL;只缓存探测成功的路径(失败不缓存,下次重试)。
+type dbProbeEntry struct {
+	oraT string // Oracle:sqlplus 绝对路径
+	ksql string // 金仓:ksql 绝对路径
+	at   time.Time
+}
+
+var (
+	dbProbeMu    sync.Mutex
+	dbProbeCache = map[string]dbProbeEntry{}
+)
+
+const dbProbeTTL = 10 * time.Minute
+
 func resolveDBRun(sshConn *host.SSHConn, cfg *Config) (*dbRun, error) {
 	if cfg.DB == nil {
 		return nil, fmt.Errorf("当前环境未挂数据库连接(设置-环境-SSH 页选择「数据库连接」)")
 	}
 	d := &dbRun{conn: cfg.DB, zone: cfg.Zone}
+	cc := sshConn.Cfg()
+	key := cc.Host + "|" + cc.User + "|" + cfg.Zone + "|" + cfg.DB.Type
+	dbProbeMu.Lock()
+	if e, ok := dbProbeCache[key]; ok && time.Since(e.at) < dbProbeTTL {
+		d.ksql, d.oraT = e.ksql, e.oraT
+		dbProbeMu.Unlock()
+		return d, nil
+	}
+	dbProbeMu.Unlock()
+
 	var err error
 	if cfg.DB.Type == "kingbase" {
 		d.ksql, err = host.ProbeKsqlPath(sshConn)
@@ -107,8 +135,14 @@ func resolveDBRun(sshConn *host.SSHConn, cfg *Config) (*dbRun, error) {
 		}
 		if env, e := host.ProbeDBEnv(sshConn, zone); e == nil {
 			d.oraT = env["SQLP"]
+		} else {
+			// 探测失败:本次按 PATH 兜底,且不写缓存(下次重试,避免把偶发失败固化 10 分钟)
+			return d, nil
 		}
 	}
+	dbProbeMu.Lock()
+	dbProbeCache[key] = dbProbeEntry{oraT: d.oraT, ksql: d.ksql, at: time.Now()}
+	dbProbeMu.Unlock()
 	return d, nil
 }
 

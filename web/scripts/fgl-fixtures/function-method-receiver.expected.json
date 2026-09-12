@@ -1,0 +1,15 @@
+{
+  "doc": "08_language-basics/0772-methods.md",
+  "about": "方法形式 FUNCTION (r Type) name() —— 接收者在名字之前",
+  "fixture": "function-method-receiver.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "area",
+      "kind": "Function",
+      "startLine": 5,
+      "endLine": 7,
+      "children": []
+    }
+  ]
+}

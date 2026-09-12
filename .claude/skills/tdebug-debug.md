@@ -158,13 +158,20 @@ tdebug interrupt
 排查接口(wssp/awsp)报文问题时:
 
 ```bash
-# 列出日志(可 --service wssp900 过滤、--fail 只看失败)
+# 列出日志(条件口径与 Web 工具条一致):
+#   --service 服务名称 wsfa001(支持 * ? 通配)  --server 服务端 wsfa018  --origin 发起端 wsfa013
+#   --result 处理结果 wsfa006(000=成功)        --from/--to 时间窗(wsfa003 >= / wsfa004 <=)
+#   --fail 只看失败                             --page 页码(每页 50)
 tdebug wslogs --service wssp900 --fail
+tdebug wslogs --server T100 --origin OA --result 100 --from 2026-09-11 --to 2026-09-12
 
 # 按指定日志重放调试:解析该次调用的作业与报文参数,自动重放并停在入口
 tdebug wsdebug <rowid>
 # 之后同样用 exec 透传调试命令
 ```
+
+> 查询固定排除 `wsfa001='docno.storage'`(SSO 记录,其 wsfa003 不是时间,会刷满整页)——与 T100 原生
+> awsq990 一致;要单独看它们目前只能直接查库。
 
 ## 约定与注意事项
 

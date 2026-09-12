@@ -1,9 +1,11 @@
-// 服务测试视图:复刻 awsq990「集成服务测试」——接口方式/网址/请求报文,直接执行看响应。
+// 服务测试视图:复刻 awsq990「集成服务测试」——接口方式/网址/请求报文,直接执行看响应,
+// 并用一张常驻表格记录每次执行(起始时间/HTTP code/运行结果/处理时间(秒),与原生 g_wsfa2_d 同列)。
 // 后端经 SSH 在服务器上以 curl 调用(与 awsq990 同网络位置)。
-import { useState } from 'react'
-import { FlaskConical, Play } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Play } from 'lucide-react'
 import { useStore } from './store'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Checkbox } from './ui'
+import { api } from './api'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Checkbox, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui'
 
 // 接口方式选项(wsfc001 映射,与 awsq990 一致)
 const MODES: [string, string, string][] = [
@@ -27,11 +29,15 @@ export function WsTestView() {
   const runWsTest = useStore((s) => s.runWsTest)
   const wsLogSel = useStore((s) => s.wsLogSel)
   const wsLogContent = useStore((s) => s.wsLogContent)
-  const [showHist, setShowHist] = useState(false)
+  // 默认地址里的区域别名(36→t35prd):取自 /api/status,避免占位符写死某一个区
+  const [zoneName, setZoneName] = useState('')
+  useEffect(() => {
+    void api.status().then((s: any) => setZoneName(s.zoneName || '')).catch(() => {})
+  }, [])
 
   const isSoap = mode === '1' || mode === '2' || mode === '5'
   const ep = MODES.find((m) => m[0] === mode)?.[1] || 'awsp920'
-  const defaultUrl = `http://127.0.0.1/wt35prd/ws/r/${ep}`
+  const defaultUrl = `http://127.0.0.1/w${zoneName || 't35prd'}/ws/r/${ep}`
 
   const doRun = () => void runWsTest()
 
@@ -78,15 +84,53 @@ export function WsTestView() {
             从日志带入({wsLogSel.service.length > 16 ? wsLogSel.service.slice(0, 16) + '…' : wsLogSel.service})
           </button>
         )}
-        {history.length > 0 && (
-          <button onClick={() => setShowHist(!showHist)}
-            className="border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent">
-            历史({history.length})
-          </button>
-        )}
       </div>
 
       {err && <div className="shrink-0 border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-xs text-red-600 dark:text-red-600 dark:text-red-400">{err}</div>}
+
+      {/* 测试日志表(复刻 awsq990 集成服务测试页的常驻表格):
+          列 = 起始时间 / HTTP code / 运行结果 / 处理时间(秒);最新在前。
+          刻意不做排序 —— 这是时序日志;目标地址放在行 tooltip 里。
+          点击行:把该次的请求报文与响应一起填回下方两个 pane(原生只展示,这里是超集)。 */}
+      <div className="max-h-44 shrink-0 overflow-auto border-b border-border bg-background">
+        <Table container={false} className="table-fixed text-xs">
+          <TableHeader>
+            <TableRow className="hover:bg-transparent">
+              <TableHead className="sticky top-0 z-10 w-40 border-b border-border bg-background">起始时间</TableHead>
+              <TableHead className="sticky top-0 z-10 w-20 border-b border-border bg-background">HTTP code</TableHead>
+              <TableHead className="sticky top-0 z-10 w-40 border-b border-border bg-background">运行结果</TableHead>
+              <TableHead className="sticky top-0 z-10 w-28 border-b border-border bg-background">处理时间(秒)</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {history.length === 0 && (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={4} className="border-0 px-2 py-2 text-center text-xs text-muted-foreground">
+                  每次「执行」在此记录一行(与 T100 原生集成服务测试页一致)
+                </TableCell>
+              </TableRow>
+            )}
+            {history.map((h, i) => (
+              <TableRow key={i} data-state={i === 0 ? 'selected' : undefined}
+                onClick={() => setWsTest({
+                  body: h.body,
+                  result: { httpCode: h.httpCode, durationSec: h.durationSec, response: h.response },
+                })}
+                title={`点击回看该次请求/响应\n${h.url}`}
+                className="h-7 cursor-pointer border-b border-border/60 hover:bg-accent/40">
+                <TableCell className="border-0 px-2 py-0 font-mono text-[11px] text-muted-foreground">{h.at}</TableCell>
+                <TableCell className={`border-0 px-2 py-0 font-mono ${h.httpCode === 200 ? 'text-emerald-600 dark:text-emerald-500' : h.httpCode > 0 ? 'text-red-500' : 'text-muted-foreground'}`}>
+                  {h.httpCode > 0 ? h.httpCode : '-'}
+                </TableCell>
+                <TableCell className="border-0 px-2 py-0">
+                  <span className="block truncate" title={h.result}>{h.result}</span>
+                </TableCell>
+                <TableCell className="border-0 px-2 py-0 font-mono text-[11px] text-muted-foreground">{h.durationSec.toFixed(3)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
 
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         {/* 请求报文:竖排时下缘分割线,横排时右缘分割线(与响应区紧贴相连) */}
@@ -126,22 +170,6 @@ export function WsTestView() {
           </div>
         </div>
       </div>
-
-      {/* 执行历史 */}
-      {showHist && history.length > 0 && (
-        <div className="max-h-44 shrink-0 overflow-auto border-t border-border bg-background">
-          {history.map((h, i) => (
-            <div key={i} onClick={() => setWsTest({ result: { httpCode: h.httpCode, durationSec: h.durationSec, response: h.response } })}
-              title="点击回看该次响应"
-              className="flex h-7 cursor-pointer items-center gap-2 border-b border-border/60 px-2 text-xs last:border-0 hover:bg-accent/40">
-              <span className="w-20 shrink-0 font-mono text-[11px] text-muted-foreground">{h.time}</span>
-              <span className={`w-14 shrink-0 font-mono ${h.httpCode === 200 ? 'text-emerald-600 dark:text-emerald-500' : 'text-red-500'}`}>{h.httpCode}</span>
-              <span className="w-20 shrink-0 font-mono text-[11px] text-muted-foreground">{h.durationSec.toFixed(3)}s</span>
-              <span className="min-w-0 flex-1 truncate text-muted-foreground" title={h.url}>{h.url}</span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   )
 }

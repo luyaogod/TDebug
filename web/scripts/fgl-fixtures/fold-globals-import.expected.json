@@ -1,0 +1,8 @@
+{
+  "doc": "09_advanced-features/0916-rules-for-globals-usage.md",
+  "about": "GLOBALS \"file\" 是引入形式（0915 Syntax 2），没有 END GLOBALS，不能压栈；因此块内那行的 END GLOBALS 只能配给第 1 行的裸 GLOBALS",
+  "fixture": "fold-globals-import.4gl",
+  "note": "行号 0-based。这条用例是「引入形式误压栈」的唯一可观测写法：引入行在裸 GLOBALS 之后、END GLOBALS 之前，若误压栈就会把折叠区从 [1,4] 变成 [2,4]。",
+  "nodes": [],
+  "folds": [[1, 4]]
+}

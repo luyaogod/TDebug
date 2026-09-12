@@ -1,0 +1,10 @@
+{
+  "doc": "08_language-basics/0680-for.md",
+  "about": "FOLD_ONLY 正例：FOR … END FOR 产出折叠区",
+  "fixture": "fold-for.4gl",
+  "note": "行号 0-based。期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    { "name": "f_for", "kind": "Function", "startLine": 1, "endLine": 5, "children": [] }
+  ],
+  "folds": [[2, 4], [1, 5]]
+}

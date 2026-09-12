@@ -1,0 +1,23 @@
+{
+  "doc": "11_user-interface/2152-syntax-of-the-declarative-dialog-block.md",
+  "about": "声明式 DIALOG 的 record-name record-type INOUT 参数形式",
+  "fixture": "dialog-declarative-record-param.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "DIALOG comment_input",
+      "kind": "Interface",
+      "startLine": 5,
+      "endLine": 8,
+      "children": [
+        {
+          "name": "INPUT BY NAME rc",
+          "kind": "Object",
+          "startLine": 6,
+          "endLine": 7,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

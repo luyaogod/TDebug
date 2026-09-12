@@ -1,0 +1,12 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "行尾边界·行中间的孤立 \\r：VS Code 的文档行模型把单独的 \\r 也当行尾，所以它确实把该行劈成两行",
+  "fixture": "fold-eol-midcr.4gl",
+  "note": "行号 0-based。",
+  "resolved": "原先这里记着一个待裁定的歧义：实现只按 \\n 分行（孤立 \\r 当行内字符保留，7 行），而 VS Code 的文本模型按 /\\r\\n|\\r|\\n/ 分（8 行）。现已从 VS Code 自身的代码确认后者 —— extensionHostProcess.js 里 `function Sx(r){ return r.split(/\\r\\n|\\r|\\n/) }` 用于切分文档内容与插入文本，编辑器的 PieceTreeTextBufferBuilder.getFirstLineText 用的也是同一条正则。所以实现在 src/extension.ts 的 maskLines 与 raw 两处都改成同一模型：含孤立 \\r 的文件里，行号必须与宿主一致，否则折叠区与 OUTLINE 会整体上移一行。语料实测：20,220 个文件里只有 2 个含这种字节（erp/adz/4gl/adzp160.4gl:1277 第 29 列、sadzp490.4gl:1410 第 156 列），apmt500.4gl 里 0 个。",
+  "eol": { "lf": 6, "crlf": 6, "loneCr": 1, "finalNewline": true },
+  "nodes": [
+    { "name": "f_cr", "kind": "Function", "startLine": 1, "endLine": 6, "children": [] }
+  ],
+  "folds": [[1, 6], [2, 5]]
+}

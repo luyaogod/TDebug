@@ -1,0 +1,23 @@
+{
+  "doc": "08_language-basics/0547-string-delimiters.md + 0548-escape-symbol.md",
+  "about": "双引号字符串里的 \\\" 是字面引号，不得终止字符串",
+  "fixture": "string-escaped-quote.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "s_quote",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 5,
+      "children": [
+        {
+          "name": "INPUT BY NAME g_cust",
+          "kind": "Object",
+          "startLine": 3,
+          "endLine": 4,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

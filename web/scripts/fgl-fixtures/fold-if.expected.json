@@ -1,0 +1,29 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "FOLD_ONLY 正例：多行 IF/ELSE/END IF 产出折叠区",
+  "fixture": "fold-if.4gl",
+  "note": "行号 0-based。期望值由 BDL 官方文档推导，非实现输出快照。 分支折叠（ELSE / WHEN / OTHERWISE）是后来补上的：VS Code 的缩进折叠本来就会在这些行各给一个箭头（ELSE 与 IF 同深、WHEN 比 CASE 更深），而我们的 provider 取代了缩进折叠，不补上就丢了「只折某个分支」的能力。",
+  "nodes": [
+    {
+      "name": "f_if",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 7,
+      "children": []
+    }
+  ],
+  "folds": [
+    [
+      1,
+      7
+    ],
+    [
+      2,
+      6
+    ],
+    [
+      4,
+      5
+    ]
+  ]
+}

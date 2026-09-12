@@ -1,0 +1,22 @@
+{
+  "doc": "12_reports/2474-the-report-routine.md",
+  "about": "REPORT 的 Syntax 1（旧式参数表）与 Syntax 2（类型化参数表）+ PUBLIC/PRIVATE",
+  "fixture": "report-public-private.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "REPORT rep_legacy",
+      "kind": "Module",
+      "startLine": 1,
+      "endLine": 5,
+      "children": []
+    },
+    {
+      "name": "REPORT rep_typed",
+      "kind": "Module",
+      "startLine": 7,
+      "endLine": 10,
+      "children": []
+    }
+  ]
+}

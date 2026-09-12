@@ -1,0 +1,38 @@
+{
+  "doc": "11_user-interface/1969-on-expand-block.md / 1970-on-collapse-block.md",
+  "about": "ON EXPAND ( row-index ) / ON COLLAPSE ( row-index ) —— 带括号参数的事件",
+  "fixture": "display-array-expand-collapse.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "da_b",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 9,
+      "children": [
+        {
+          "name": "DISPLAY ARRAY arr",
+          "kind": "Array",
+          "startLine": 3,
+          "endLine": 8,
+          "children": [
+            {
+              "name": "ON EXPAND (row_idx)",
+              "kind": "Event",
+              "startLine": 4,
+              "endLine": 5,
+              "children": []
+            },
+            {
+              "name": "ON COLLAPSE (row_idx)",
+              "kind": "Event",
+              "startLine": 6,
+              "endLine": 7,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

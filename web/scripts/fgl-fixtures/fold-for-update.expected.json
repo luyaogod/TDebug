@@ -1,0 +1,10 @@
+{
+  "doc": "10_sql-support/1158-declare-select-for-update.md",
+  "about": "FOR UPDATE 守卫：行首的 FOR UPDATE 是 SQL 锁定子句，不是 FOR 块；第 10 行的 END FOR 必须配到第 4 行",
+  "fixture": "fold-for-update.4gl",
+  "note": "行号 0-based。这条用例的可观测性来自「DECLARE 写在 FOR 循环体内」：若 FOR UPDATE 误压栈，栈顶变成第 7 行，折叠区就从 [4,10] 变成 [7,10]。",
+  "nodes": [
+    { "name": "f_locked", "kind": "Function", "startLine": 2, "endLine": 11, "children": [] }
+  ],
+  "folds": [[4, 10], [2, 11]]
+}

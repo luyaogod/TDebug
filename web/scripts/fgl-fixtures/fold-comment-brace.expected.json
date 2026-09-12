@@ -1,0 +1,11 @@
+{
+  "doc": "08_language-basics/0550-source-comments.md",
+  "about": "{ } 块注释跨行：注释里的 IF/END IF 不是代码，注释结束后第 5 行的 IF 才是真的",
+  "fixture": "fold-comment-brace.4gl",
+  "note": "行号 0-based。0550：『A starting left-brace ( { ) starts a comment. It can be followed by any character (including line breaks). The comment ends when the closing right-brace ( } ) symbol is found.』且 { } 不可嵌套。",
+  "eol": { "lf": 9, "crlf": 0, "loneCr": 0, "finalNewline": true },
+  "nodes": [
+    { "name": "f_brace", "kind": "Function", "startLine": 1, "endLine": 8, "children": [] }
+  ],
+  "folds": [[5, 7], [1, 8]]
+}

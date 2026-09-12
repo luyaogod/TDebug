@@ -1,0 +1,38 @@
+{
+  "doc": "11_user-interface/2007-syntax-of-input-array-instruction.md",
+  "about": "INPUT ARRAY array FROM screen-array.* + BEFORE ROW / ON ROW CHANGE",
+  "fixture": "input-array-basic.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "ia_edit",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 11,
+      "children": [
+        {
+          "name": "INPUT ARRAY arr",
+          "kind": "Object",
+          "startLine": 5,
+          "endLine": 10,
+          "children": [
+            {
+              "name": "BEFORE ROW",
+              "kind": "Event",
+              "startLine": 6,
+              "endLine": 7,
+              "children": []
+            },
+            {
+              "name": "ON ROW CHANGE",
+              "kind": "Event",
+              "startLine": 8,
+              "endLine": 9,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

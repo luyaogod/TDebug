@@ -1,0 +1,74 @@
+{
+  "doc": "11_user-interface/2078-syntax-of-the-procedural-dialog-instruction.md",
+  "about": "DIALOG ATTRIBUTES(...) + dialog-control-block（BEFORE/AFTER DIALOG、ON IDLE、ON TIMER、ON KEY）",
+  "fixture": "dialog-procedural-attributes.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "ui_main",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 18,
+      "children": [
+        {
+          "name": "DIALOG",
+          "kind": "Interface",
+          "startLine": 2,
+          "endLine": 17,
+          "children": [
+            {
+              "name": "INPUT BY NAME g_cust",
+              "kind": "Object",
+              "startLine": 3,
+              "endLine": 6,
+              "children": [
+                {
+                  "name": "ON ACTION accept",
+                  "kind": "Event",
+                  "startLine": 4,
+                  "endLine": 5,
+                  "children": []
+                }
+              ]
+            },
+            {
+              "name": "BEFORE DIALOG",
+              "kind": "Event",
+              "startLine": 7,
+              "endLine": 8,
+              "children": []
+            },
+            {
+              "name": "ON IDLE 10",
+              "kind": "Event",
+              "startLine": 9,
+              "endLine": 10,
+              "children": []
+            },
+            {
+              "name": "ON TIMER 5",
+              "kind": "Event",
+              "startLine": 11,
+              "endLine": 12,
+              "children": []
+            },
+            {
+              "name": "ON KEY (F11)",
+              "kind": "Event",
+              "startLine": 13,
+              "endLine": 14,
+              "children": []
+            },
+            {
+              "name": "AFTER DIALOG",
+              "kind": "Event",
+              "startLine": 15,
+              "endLine": 16,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

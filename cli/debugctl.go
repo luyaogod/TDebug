@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,6 +24,11 @@ var (
 	dbgZone    string
 	dbgSSHName string
 	wsService  string
+	wsOrigin   string
+	wsServer   string
+	wsResult   string
+	wsFrom     string
+	wsTo       string
 	wsOnlyFail bool
 	wsPage     int
 	wsJSON     bool
@@ -233,9 +240,19 @@ var debugWslogsCmd = &cobra.Command{
 	Use:   "wslogs",
 	Short: "获取接口日志列表(wssp/awsp 报文流水)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := fmt.Sprintf("/api/wslogs?service=%s&onlyFail=%d&page=%d&pageSize=50&startFrom=&startTo=",
-			wsService, boolInt(wsOnlyFail), wsPage)
-		data, err := dbgAPI("GET", path, nil)
+		// 条件对齐 awsq990(与 Web 工具条一致):服务名称 wsfa001(支持 * ? 通配)、
+		// 处理结果 wsfa006、发起端 wsfa013、服务端 wsfa018;时间窗 = wsfa003 >= from 且 wsfa004 <= to
+		q := url.Values{}
+		q.Set("service", wsService)
+		q.Set("result", wsResult)
+		q.Set("origin", wsOrigin)
+		q.Set("server", wsServer)
+		q.Set("onlyFail", strconv.Itoa(boolInt(wsOnlyFail)))
+		q.Set("page", strconv.Itoa(wsPage))
+		q.Set("pageSize", "50")
+		q.Set("startFrom", wsFrom)
+		q.Set("endTo", wsTo)
+		data, err := dbgAPI("GET", "/api/wslogs?"+q.Encode(), nil)
 		if err != nil {
 			return err
 		}
@@ -248,10 +265,13 @@ var debugWslogsCmd = &cobra.Command{
 				Rowid    string `json:"rowid"`
 				Service  string `json:"service"`
 				Start    string `json:"start"`
+				End      string `json:"end"`
 				Duration string `json:"duration"`
 				Code     string `json:"code"`
 				Job      string `json:"job"`
 				ErrMsg   string `json:"errMsg"`
+				Origin   string `json:"origin"`
+				Server   string `json:"server"`
 			} `json:"items"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
@@ -259,6 +279,12 @@ var debugWslogsCmd = &cobra.Command{
 		}
 		for _, it := range r.Items {
 			line := fmt.Sprintf("%s  %-12s %s  %sms  作业=%s", it.Start, it.Service, it.Code, it.Duration, it.Job)
+			if it.End != "" {
+				line += "  结束=" + it.End
+			}
+			if it.Origin != "" || it.Server != "" {
+				line += fmt.Sprintf("  %s/%s", it.Origin, it.Server)
+			}
 			if it.ErrMsg != "" {
 				line += "  ERR=" + it.ErrMsg
 			}
@@ -315,8 +341,13 @@ func init() {
 	debugStartCmd.Flags().StringVarP(&dbgModule, "module", "m", "asf", "T100 模块目录名(如 asf)")
 	debugStartCmd.Flags().StringVar(&dbgZone, "zone", "", "区域代码覆盖(31开发/35测试/36正式;默认取配置)")
 	debugStartCmd.Flags().StringVar(&dbgSSHName, "ssh", "", "SSH 配置名(设置页配置的多 SSH;默认取配置)")
-	debugWslogsCmd.Flags().StringVar(&wsService, "service", "", "按服务名过滤(如 wssp900)")
-	debugWslogsCmd.Flags().BoolVar(&wsOnlyFail, "fail", false, "只看失败日志")
+	debugWslogsCmd.Flags().StringVar(&wsService, "service", "", "服务名称 wsfa001(支持 * ? 通配,如 wssp900 / icd.erp.wo*)")
+	debugWslogsCmd.Flags().StringVar(&wsServer, "server", "", "服务端 wsfa018(等值,如 T100)")
+	debugWslogsCmd.Flags().StringVar(&wsOrigin, "origin", "", "发起端 wsfa013(等值,如 OA)")
+	debugWslogsCmd.Flags().StringVar(&wsResult, "result", "", "处理结果 wsfa006(等值,如 000 成功 / 100 失败)")
+	debugWslogsCmd.Flags().StringVar(&wsFrom, "from", "", "起始时间下界 wsfa003(yyyy-mm-dd)")
+	debugWslogsCmd.Flags().StringVar(&wsTo, "to", "", "结束时间上界 wsfa004(yyyy-mm-dd,含当天)")
+	debugWslogsCmd.Flags().BoolVar(&wsOnlyFail, "fail", false, "只看失败日志(wsfa006<>000)")
 	debugWslogsCmd.Flags().IntVar(&wsPage, "page", 1, "页码(每页 50 条)")
 	debugWslogsCmd.Flags().BoolVar(&wsJSON, "json", false, "输出原始 JSON")
 	addClientURLFlag(debugStartCmd, debugExecCmd, debugStatusCmd, debugQuitCmd, debugWslogsCmd, debugWsdebugCmd)

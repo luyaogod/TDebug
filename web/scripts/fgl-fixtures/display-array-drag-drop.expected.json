@@ -1,0 +1,59 @@
+{
+  "doc": "11_user-interface/1990-1994（ON DRAG_START / DRAG_FINISHED / DRAG_ENTER / DRAG_OVER / DROP）",
+  "about": "拖放事件：ON DRAG_START/FINISHED/ENTER/OVER ( dnd-object ) 与 ON DROP ( dnd-object )",
+  "fixture": "display-array-drag-drop.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "da_c",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 15,
+      "children": [
+        {
+          "name": "DISPLAY ARRAY arr",
+          "kind": "Array",
+          "startLine": 3,
+          "endLine": 14,
+          "children": [
+            {
+              "name": "ON DRAG_START (dnd)",
+              "kind": "Event",
+              "startLine": 4,
+              "endLine": 5,
+              "children": []
+            },
+            {
+              "name": "ON DRAG_FINISHED (dnd)",
+              "kind": "Event",
+              "startLine": 6,
+              "endLine": 7,
+              "children": []
+            },
+            {
+              "name": "ON DRAG_ENTER (dnd)",
+              "kind": "Event",
+              "startLine": 8,
+              "endLine": 9,
+              "children": []
+            },
+            {
+              "name": "ON DRAG_OVER (dnd)",
+              "kind": "Event",
+              "startLine": 10,
+              "endLine": 11,
+              "children": []
+            },
+            {
+              "name": "ON DROP (dnd)",
+              "kind": "Event",
+              "startLine": 12,
+              "endLine": 13,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

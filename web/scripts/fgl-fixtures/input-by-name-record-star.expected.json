@@ -1,0 +1,24 @@
+{
+  "doc": "11_user-interface/1932-syntax-of-the-input-instruction.md",
+  "about": "INPUT BY NAME 的 record.* 绑定形式（文档的 { variable | record.* }）",
+  "fixture": "input-by-name-record-star.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "deviation": "标签文本本身文档没规定（只规定语法写 record.*）。实现里 ID 词素不含 *，于是匹配到 \"g_cust.\" 再由 normalize() 去掉尾点，标签成 \"INPUT BY NAME g_cust\" —— 与 INPUT BY NAME g_cust 的标签完全相同，丢失了 \"整记录\" vs \"单变量\" 的区别。建议把 ID 允许尾部 .* 并在取名字后去掉。",
+  "nodes": [
+    {
+      "name": "inp_star",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 4,
+      "children": [
+        {
+          "name": "INPUT BY NAME g_cust.*",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 3,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

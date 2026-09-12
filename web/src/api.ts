@@ -19,13 +19,48 @@ export interface WSLogItem {
   start: string; end: string; duration: string
   code: string; job: string
   reqPath: string; rspPath: string; reqSize: string; rspSize: string; errMsg: string
+  // 对齐 T100 原生页 awsq990 补上的三项(中文名以 tdict rt wsfa_t 字典为准)
+  origin: string  // wsfa013 发起端
+  server: string  // wsfa018 服务端
+  sso: string     // wsfa015 sso秒数
 }
 export interface WSLogContent {
   request: string; response: string
 }
+// 接口日志查询条件(对齐 T100 原生页 awsq990 的 QBE):
+// startFrom = wsfa003(起始时间)下界,endTo = wsfa004(结束时间)上界;
+// result/origin/server 为等值过滤(wsfa006/wsfa013/wsfa018)
+export interface WSLogQuery {
+  service?: string
+  result?: string
+  origin?: string
+  server?: string
+  onlyFail?: boolean
+  page?: number
+  startFrom?: string
+  endTo?: string
+}
 
 export interface WSTestResult {
   httpCode: number; durationSec: number; response: string; error?: string
+}
+
+// HTTP 状态码 → 原因短语(服务测试的「运行结果」列)。
+// 原生 awsq990 取的是 com.HTTPResponse.getStatusDescription()(服务器返回的短语);
+// curl 只给数字码,故按标准原因短语映射 —— 标准码结果与原生一致,未命中的码回落 HTTP <code>。
+const HTTP_STATUS_TEXT: Record<number, string> = {
+  200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content',
+  301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified',
+  400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found',
+  405: 'Method Not Allowed', 406: 'Not Acceptable', 408: 'Request Timeout',
+  409: 'Conflict', 415: 'Unsupported Media Type', 429: 'Too Many Requests',
+  500: 'Internal Server Error', 501: 'Not Implemented', 502: 'Bad Gateway',
+  503: 'Service Unavailable', 504: 'Gateway Timeout',
+}
+
+export function httpStatusText(code: number, err?: string): string {
+  if (code > 0) return HTTP_STATUS_TEXT[code] ?? `HTTP ${code}`
+  return err ? err : '无响应'
 }
 
 export interface Event {
@@ -95,8 +130,18 @@ export const api = {
   calibrate: (id: string) => req<{ offset: number }>(`/api/sessions/${id}/calibrate`, { method: 'POST' }),
   wsTest: (mode: string, url: string, body: string, soap: boolean) =>
     req<{ result: WSTestResult }>('/api/wstest', { method: 'POST', body: JSON.stringify({ mode, url, body, soap }) }),
-  wsLogs: (service: string, onlyFail: boolean, page: number, startFrom: string, startTo: string) =>
-    req<{ items: WSLogItem[]; hasMore: boolean }>(`/api/wslogs?service=${encodeURIComponent(service)}&onlyFail=${onlyFail ? 1 : 0}&page=${page}&pageSize=200&startFrom=${encodeURIComponent(startFrom)}&startTo=${encodeURIComponent(startTo)}`),
+  // 条件用对象传递(参数变多后位置参数太容易错位);空值不发送
+  wsLogs: (q: WSLogQuery) => {
+    const p = new URLSearchParams()
+    for (const [k, v] of Object.entries(q)) {
+      if (v === undefined || v === null || v === '' || v === false) continue
+      p.set(k, typeof v === 'boolean' ? (v ? '1' : '0') : String(v))
+    }
+    p.set('onlyFail', q.onlyFail ? '1' : '0')
+    p.set('page', String(q.page ?? 1))
+    p.set('pageSize', '200')
+    return req<{ items: WSLogItem[]; hasMore: boolean }>(`/api/wslogs?${p.toString()}`)
+  },
   wsLogContent: (rowid: string) =>
     req<{ item: WSLogItem; content: WSLogContent }>(`/api/wslogs/content?rowid=${encodeURIComponent(rowid)}`),
   wsLogDebug: (rowid: string) =>

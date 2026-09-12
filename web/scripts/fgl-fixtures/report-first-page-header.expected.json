@@ -1,0 +1,38 @@
+{
+  "doc": "12_reports/2481-first-page-header.md",
+  "about": "FORMAT 段的 [FIRST] PAGE HEADER / PAGE TRAILER / ON LAST ROW 控制块",
+  "fixture": "report-first-page-header.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "deviation": "FORMAT 段的 FIRST PAGE HEADER / PAGE TRAILER / ON LAST ROW 都未被识别（只认 BEFORE/AFTER + 有限事件表）",
+  "nodes": [
+    {
+      "name": "REPORT rep_fph",
+      "kind": "Module",
+      "startLine": 1,
+      "endLine": 10,
+      "children": [
+        {
+          "name": "FIRST PAGE HEADER",
+          "kind": "Event",
+          "startLine": 4,
+          "endLine": 5,
+          "children": []
+        },
+        {
+          "name": "PAGE TRAILER",
+          "kind": "Event",
+          "startLine": 6,
+          "endLine": 7,
+          "children": []
+        },
+        {
+          "name": "ON LAST ROW",
+          "kind": "Event",
+          "startLine": 8,
+          "endLine": 9,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

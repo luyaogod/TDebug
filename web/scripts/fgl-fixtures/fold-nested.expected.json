@@ -1,0 +1,10 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "嵌套：IF > FOR > IF 三层，内层 END IF 不能被外层 IF 抢走",
+  "fixture": "fold-nested.4gl",
+  "note": "行号 0-based。期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    { "name": "f_nested", "kind": "Function", "startLine": 1, "endLine": 9, "children": [] }
+  ],
+  "folds": [[4, 6], [3, 7], [2, 8], [1, 9]]
+}

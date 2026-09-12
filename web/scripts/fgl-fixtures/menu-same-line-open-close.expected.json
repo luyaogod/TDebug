@@ -1,0 +1,23 @@
+{
+  "doc": "11_user-interface/1906-syntax-of-the-menu-instruction.md + 08_language-basics/0546-whitespace-separators.md",
+  "about": "同行开闭：MENU \"t\" COMMAND \"Quit\" EXIT MENU END MENU",
+  "fixture": "menu-same-line-open-close.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "m_line",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 3,
+      "children": [
+        {
+          "name": "MENU \"Test\"",
+          "kind": "Namespace",
+          "startLine": 2,
+          "endLine": 2,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

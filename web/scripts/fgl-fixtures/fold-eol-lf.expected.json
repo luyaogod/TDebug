@@ -1,0 +1,11 @@
+{
+  "doc": "08_language-basics/0682-if.md",
+  "about": "行尾边界·纯 LF：折叠区与符号树 range 的行号（行号本身与行尾无关，此条是与 CRLF/混合两条互相对照的基线）",
+  "fixture": "fold-eol-lf.4gl",
+  "note": "行号 0-based。eol 字段断言源文件真实字节 —— 仓库 core.autocrlf=true 且无 .gitattributes，checkout 时这条用例可能被改写而静默失效。",
+  "eol": { "lf": 6, "crlf": 0, "loneCr": 0, "finalNewline": true },
+  "nodes": [
+    { "name": "f_eol", "kind": "Function", "startLine": 1, "endLine": 5, "children": [] }
+  ],
+  "folds": [[2, 4], [1, 5]]
+}

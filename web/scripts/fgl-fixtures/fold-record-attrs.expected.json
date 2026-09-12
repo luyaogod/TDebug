@@ -1,0 +1,8 @@
+{
+  "doc": "08_language-basics/0718-attributes-on-record-definitions.md",
+  "about": "RECORD 后紧跟 ATTRIBUTES(...) 时，RECORD 不在行尾，但仍是跨多行的 RECORD 块，应当产出折叠区",
+  "fixture": "fold-record-attrs.4gl",
+  "note": "行号 0-based。0718 的 Syntax 明确写 attributes-list 跟在 RECORD 之后（{ATTRIBUTE|ATTRIBUTES} ( … )），且该页正例就是 `TYPE t_cust RECORD ATTRIBUTES(json_name=\"customer\")` 这种三行块。",
+  "nodes": [],
+  "folds": [[1, 4]]
+}

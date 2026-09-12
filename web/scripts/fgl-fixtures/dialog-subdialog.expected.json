@@ -1,0 +1,47 @@
+{
+  "doc": "11_user-interface/2078-syntax-of-the-procedural-dialog-instruction.md + 2087-the-subdialog-clause.md",
+  "about": "SUBDIALOG [module.]name[(params)] —— 单行、无终止符；语法上与 sub-dialog block 并列",
+  "fixture": "dialog-subdialog.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "deviation": "SUBDIALOG 未被识别为节点。文档 2078 把它列在 { record-input-block | construct-block | display-array-block | input-array-block | SUBDIALOG } 同一位置，故按语法应是一个节点；但节点 kind 与 name 形态文档没定义 —— 需要人定。",
+  "nodes": [
+    {
+      "name": "DIALOG sub_a",
+      "kind": "Interface",
+      "startLine": 1,
+      "endLine": 4,
+      "children": [
+        {
+          "name": "INPUT BY NAME a_num",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 3,
+          "children": []
+        }
+      ]
+    },
+    {
+      "name": "parent_dlg",
+      "kind": "Function",
+      "startLine": 6,
+      "endLine": 10,
+      "children": [
+        {
+          "name": "DIALOG",
+          "kind": "Interface",
+          "startLine": 7,
+          "endLine": 9,
+          "children": [
+            {
+              "name": "SUBDIALOG sub_a",
+              "kind": "Interface",
+              "startLine": 8,
+              "endLine": 8,
+              "children": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

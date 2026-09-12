@@ -194,6 +194,7 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 		"server":   "tdebug-debug",
 		"ssh":      s.cfg.SSH.Host,
 		"zone":     s.cfg.Zone,
+		"zoneName": host.ZoneTNSName(s.cfg.Zone), // 区域代码 → T100 服务别名(如 36→t35prd;服务测试默认地址要用)
 		"listen":   s.ListenAddr(),
 		"watchdog": s.cfg.WatchdogSeconds,
 	}
@@ -885,7 +886,8 @@ func (s *Server) wsZone() string {
 	return s.cfg.Zone
 }
 
-// hWSLogs GET /api/wslogs?service=&onlyFail=1&limit=200
+// hWSLogs GET /api/wslogs?service=&result=&origin=&server=&onlyFail=1&page=&pageSize=&startFrom=&endTo=
+// 时间窗对齐原生 awsq990:startFrom 是 wsfa003(起始时间)下界,endTo 是 wsfa004(结束时间)上界
 func (s *Server) hWSLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
@@ -903,9 +905,12 @@ func (s *Server) hWSLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	items, hasMore, err := listWSLogs(conn, dbc, WSLogFilter{
 		Service:   q.Get("service"),
+		Result:    q.Get("result"),
+		Origin:    q.Get("origin"),
+		Server:    q.Get("server"),
 		OnlyFail:  q.Get("onlyFail") == "1",
 		StartFrom: q.Get("startFrom"),
-		StartTo:   q.Get("startTo"),
+		EndTo:     q.Get("endTo"),
 		Page:      page,
 		PageSize:  pageSize,
 	})

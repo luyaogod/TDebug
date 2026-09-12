@@ -24,13 +24,46 @@ var wsEndpoints = map[string]string{
 	"5": "awsp930", // OpenApi Web service
 }
 
-// WSDefaultURLFor 按接口方式与登录区域(→ T100 服务别名)生成默认 URL
+// WSDefaultURLFor 按接口方式与登录区域(→ T100 服务别名)生成默认 URL。
+// 前缀口径与 awsq990 一致:出貨區(ZONE=topprd)是 /ws<ZONE>,其余区是 /w<ZONE>。
 func WSDefaultURLFor(cfg *Config, mode string) string {
 	ep := wsEndpoints[mode]
 	if ep == "" {
 		ep = "awsp920"
 	}
-	return "http://127.0.0.1/w" + host.ZoneTNSName(cfg.Zone) + "/ws/r/" + ep
+	zone := host.ZoneTNSName(cfg.Zone)
+	prefix := "/w"
+	if zone == "topprd" {
+		prefix = "/ws"
+	}
+	return "http://127.0.0.1" + prefix + zone + "/ws/r/" + ep
+}
+
+// stripWSDLSuffix 去掉 ?wsdl 查询后缀(原生:URL 匹配 http://*?wsdl 即去掉,
+// 否则 POST 会打到 WSDL 描述页而不是服务端点)。
+func stripWSDLSuffix(url string) string {
+	const suffix = "?wsdl"
+	if len(url) >= len(suffix) && strings.EqualFold(url[len(url)-len(suffix):], suffix) {
+		return url[:len(url)-len(suffix)]
+	}
+	return url
+}
+
+// soapEnvelope 把请求载荷包进 TIPTOP 网关的 SOAP 信封(与 awsq990 btn_test 的 WHEN '1'/'5' 一致:
+// soapenv:Envelope → tip:invokeSrv → request)。
+// 原生只转义 < 与 >;这里额外转义 &(NewReplacer 单趟替换,先列 & 也不会二次转义),
+// 否则载荷里出现 & 会产出非法 XML,网关直接 400。
+func soapEnvelope(payload string) string {
+	esc := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(payload)
+	return `<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:tip="http://www.digiwin.com.cn/tiptop/TIPTOPServiceGateWay">` + "\n" +
+		"   <soapenv:Header/>\n" +
+		"   <soapenv:Body>\n" +
+		"      <tip:invokeSrv>\n" +
+		"         <request>\n" + esc + "\n" +
+		"         </request>\n" +
+		"      </tip:invokeSrv>\n" +
+		"   </soapenv:Body>\n" +
+		"</soapenv:Envelope>"
 }
 
 // WSTestResult 单次执行结果
@@ -42,13 +75,18 @@ type WSTestResult struct {
 }
 
 // WSTest 执行一次接口调用:报文落服务器临时文件后 curl POST。
-// soap=true 时带 SOAPAction:"" 头(与 awsq990_req_test 一致)。
+// soap=true 时按原生口径把载荷包进 SOAP 信封,并带 SOAPAction:"" 头(与 awsq990 btn_test 一致)。
 func WSTest(conn *host.SSHConn, url, body string, soap bool, timeoutSec int) (*WSTestResult, error) {
+	url = stripWSDLSuffix(url)
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return nil, fmt.Errorf("URL 必须以 http:// 或 https:// 开头")
 	}
 	if len(body) > 256*1024 {
 		return nil, fmt.Errorf("报文超过 256KB")
+	}
+	// 信封在发送时构造:请求报文区里始终是用户填的原始载荷(与原生一致)
+	if soap {
+		body = soapEnvelope(body)
 	}
 	if timeoutSec <= 0 || timeoutSec > 120 {
 		timeoutSec = 60

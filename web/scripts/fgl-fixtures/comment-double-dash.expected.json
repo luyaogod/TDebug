@@ -1,0 +1,23 @@
+{
+  "doc": "08_language-basics/0550-source-comments.md",
+  "about": "-- 行注释是合法注释标记；注释里的撇号不得开启字符串状态",
+  "fixture": "comment-double-dash.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "c_dash",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 5,
+      "children": [
+        {
+          "name": "INPUT BY NAME g_cust",
+          "kind": "Object",
+          "startLine": 3,
+          "endLine": 4,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

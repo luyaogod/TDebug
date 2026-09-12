@@ -1,0 +1,15 @@
+{
+  "doc": "12_reports/2474-the-report-routine.md",
+  "about": "format-section 的简写形式 FORMAT EVERY ROW（无 control block）",
+  "fixture": "report-format-every-row.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "REPORT rep_fmt",
+      "kind": "Module",
+      "startLine": 1,
+      "endLine": 5,
+      "children": []
+    }
+  ]
+}

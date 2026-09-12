@@ -1,0 +1,10 @@
+{
+  "doc": "13_programming-tools/2566-conditional-compilation.md",
+  "about": "FOLD_ONLY 正例：&ifdef … &endif 产出折叠区（&else 不参与配对）",
+  "fixture": "fold-ifdef.4gl",
+  "note": "行号 0-based。期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    { "name": "f_ifdef", "kind": "Function", "startLine": 1, "endLine": 7, "children": [] }
+  ],
+  "folds": [[2, 6], [1, 7]]
+}

@@ -1,0 +1,23 @@
+{
+  "doc": "11_user-interface/1932-syntax-of-the-input-instruction.md",
+  "about": "END INPUT 在语法上可选：无 dialog-control-block 时 INPUT 只是一条语句",
+  "fixture": "input-no-terminator.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "inp_bare",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 4,
+      "children": [
+        {
+          "name": "INPUT BY NAME g_cust",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 2,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

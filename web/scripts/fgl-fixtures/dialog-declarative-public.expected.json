@@ -1,0 +1,23 @@
+{
+  "doc": "11_user-interface/2152-syntax-of-the-declarative-dialog-block.md",
+  "about": "[PRIVATE|PUBLIC] 前缀的声明式 DIALOG",
+  "fixture": "dialog-declarative-public.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "DIALOG order_input",
+      "kind": "Interface",
+      "startLine": 1,
+      "endLine": 4,
+      "children": [
+        {
+          "name": "INPUT BY NAME o_num",
+          "kind": "Object",
+          "startLine": 2,
+          "endLine": 3,
+          "children": []
+        }
+      ]
+    }
+  ]
+}

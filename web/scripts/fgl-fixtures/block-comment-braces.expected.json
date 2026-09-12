@@ -1,0 +1,15 @@
+{
+  "doc": "08_language-basics/0550-source-comments.md",
+  "about": "{ } 块注释里的 INPUT/END INPUT 不得产生幻影节点（基线）",
+  "fixture": "block-comment-braces.4gl",
+  "note": "startLine/endLine 为 0-based；期望值由 BDL 官方文档推导，非实现输出快照。",
+  "nodes": [
+    {
+      "name": "c_brace",
+      "kind": "Function",
+      "startLine": 1,
+      "endLine": 7,
+      "children": []
+    }
+  ]
+}
