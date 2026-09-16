@@ -21,7 +21,7 @@ export function PayloadEditor({ text, editable = false, onChange, loading, empty
   /** 模型路径:同一路径复用同一 model(切页签不丢视口/undo);只读查看器可不传 */
   path?: string
 }) {
-  const theme = useStore((s) => s.theme)
+  const dark = useStore((s) => s.dark)
   const value = text ?? ''
 
   // 外层统一铺编辑器背景色(--card 在两套主题里都等于 editor.background),
@@ -37,7 +37,7 @@ export function PayloadEditor({ text, editable = false, onChange, loading, empty
       <Editor
         path={path}
         language={payloadLanguage(value)}
-        theme={monacoThemeName(theme)}
+        theme={monacoThemeName(dark)}
         value={value}
         beforeMount={setupMonaco}
         onChange={(v) => onChange?.(v ?? '')}

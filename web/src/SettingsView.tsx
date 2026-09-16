@@ -5,7 +5,7 @@
 // 账号语义:运行时由 TOPENT 决定(服务器 gzou_t 解析账号名,密码查账号列表);
 // 账号列表为账号=密码的常用账号清单,逐行可用 Zap 在服务器侧验证连接(只读)。
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Plus, Trash2, Monitor, Server, Database, SlidersHorizontal, Sun, Eye, EyeOff, RefreshCw, Zap } from 'lucide-react'
+import { Plus, Trash2, Monitor, Server, Database, SlidersHorizontal, Sun, Moon, Eye, EyeOff, RefreshCw, Zap } from 'lucide-react'
 import { api } from './api'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -13,7 +13,8 @@ import {
   Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator,
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from './ui'
-import { useStore } from './store'
+import { useStore, type ThemeMode } from './store'
+import { cn } from './lib/utils'
 
 interface SshDb {
   type: string // oracle | kingbase
@@ -43,6 +44,66 @@ const SECTIONS: { key: Section; label: string; icon: typeof Monitor }[] = [
   { key: 'appearance', label: '外观', icon: Monitor },
   { key: 'advanced', label: '高级', icon: SlidersHorizontal },
 ]
+
+// 主题切换卡片(shadcn 主题切换卡样式):三张卡各带一张迷你界面预览,选中卡描边+底色高亮。
+const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
+  { value: 'light', label: '亮色', icon: Sun },
+  { value: 'dark', label: '暗色', icon: Moon },
+  { value: 'system', label: '跟随系统', icon: Monitor },
+]
+
+// 迷你界面:左侧栏条 + 内容卡(用被预览主题的配色,尺寸固定,只示意明暗关系)
+function ThemePreview({ bg, bar, panel }: { bg: string; bar: string; panel: string }) {
+  return (
+    <span className="flex h-full w-full items-stretch gap-1 p-1.5" style={{ background: bg }}>
+      <span className="h-full w-1.5 shrink-0 rounded-[2px]" style={{ background: bar }} />
+      <span className="flex h-full min-w-0 flex-1 flex-col justify-center gap-1 rounded-[2px]" style={{ background: panel }}>
+        <span className="mx-1 h-1 rounded-full" style={{ background: bar }} />
+        <span className="mx-1 h-1 w-2/3 rounded-full" style={{ background: bar }} />
+      </span>
+    </span>
+  )
+}
+
+const LIGHT_PREVIEW = { bg: '#ffffff', bar: '#d4d4d4', panel: '#f4f4f4' }
+const DARK_PREVIEW = { bg: '#1f1f1f', bar: '#4a4a4a', panel: '#2b2b2b' }
+
+function ThemeCards({ value, onChange }: { value: ThemeMode; onChange: (t: ThemeMode) => void }) {
+  return (
+    <div className="grid max-w-md grid-cols-3 gap-2">
+      {THEME_OPTIONS.map((o) => {
+        const Icon = o.icon
+        const active = value === o.value
+        return (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={active}
+            title={`切换到「${o.label}」`}
+            onClick={() => onChange(o.value)}
+            className={cn('flex flex-col gap-2 rounded-md border p-2 text-left transition-colors',
+              active ? 'border-foreground/50 bg-accent/60' : 'border-border hover:bg-accent/40')}
+          >
+            <span className="flex h-10 w-full overflow-hidden rounded border border-border/70">
+              {o.value === 'light' && <ThemePreview {...LIGHT_PREVIEW} />}
+              {o.value === 'dark' && <ThemePreview {...DARK_PREVIEW} />}
+              {o.value === 'system' && (
+                <>
+                  <span className="flex h-full w-1/2"><ThemePreview {...LIGHT_PREVIEW} /></span>
+                  <span className="flex h-full w-1/2 border-l border-border/70"><ThemePreview {...DARK_PREVIEW} /></span>
+                </>
+              )}
+            </span>
+            <span className={cn('flex items-center gap-1.5 text-xs', active ? 'text-foreground' : 'text-muted-foreground')}>
+              <Icon className="h-3.5 w-3.5" />
+              {o.label}
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 const input = 'h-7 text-xs'
 const cell = 'h-7 w-full min-w-0 text-xs'
@@ -504,14 +565,10 @@ export function SettingsView() {
           {section === 'appearance' && (
             <section>
               <h3 className="mb-2 font-medium text-foreground">主题</h3>
-              <div className="flex gap-2">
-                <Button size="sm" variant={theme === 'dark' ? 'secondary' : 'outline'} onClick={() => setTheme('dark')}>
-                  <Monitor className="mr-1 h-3.5 w-3.5" />暗色
-                </Button>
-                <Button size="sm" variant={theme === 'light' ? 'secondary' : 'outline'} onClick={() => setTheme('light')}>
-                  <Sun className="mr-1 h-3.5 w-3.5" />亮色
-                </Button>
-              </div>
+              <ThemeCards value={theme} onChange={setTheme} />
+              <p className="mt-2 text-xs text-muted-foreground">
+                「跟随系统」随操作系统的明暗设置实时切换(改系统主题后无需重启)。
+              </p>
             </section>
           )}
 

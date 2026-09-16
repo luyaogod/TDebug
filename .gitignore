@@ -5,6 +5,10 @@
 # go:embed 依赖:clone 后需 cd web && npm install && npm run build
 /web/dist/
 
+# 桌面版(Electron)
+/desktop/node_modules/
+/desktop/.dev-data/
+
 # 前端 check 脚本的临时打包产物(npm run check:tokens / check:outline)
 /web/scripts/.tmp-*.mjs
 

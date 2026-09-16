@@ -256,7 +256,23 @@ func (c *Config) FGLSOURCEPath(module string) string {
 
 // LoadConfig 从 config.json 读取顶层 "debug" 键并填充默认值;
 // 同时读入同文件顶层 "connections" 快照(供 dbConn 引用解析)。
-func LoadConfig(path string) (*Config, error) {
+// 要求已配置至少一个服务器环境(CLI 命令都按"有环境可连"前提工作)。
+func LoadConfig(path string) (*Config, error) { return loadConfig(path, true) }
+
+// LoadConfigAllowEmpty 同 LoadConfig,但允许 sshs 为空。
+// 桌面版(Electron)首启时还没有任何环境,服务要能先起来,用户再到「设置 → 环境」里添加;
+// CLI 路径不用它,保持"没配环境就报错"的既有语义。
+func LoadConfigAllowEmpty(path string) (*Config, error) { return loadConfig(path, false) }
+
+// NewDefaultConfig 返回一份填好默认值的空配置(不含任何服务器环境):
+// 桌面版首启写 config.json 骨架用,默认值与 fillDefaults 永远一致(不重复硬编码)。
+func NewDefaultConfig() *Config {
+	c := &Config{}
+	c.fillDefaults()
+	return c
+}
+
+func loadConfig(path string, requireEnv bool) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("读取配置失败: %w", err)
@@ -272,7 +288,7 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	cfg := wrapper.Debug
 	cfg.fillDefaults()
-	if len(cfg.SSHs) == 0 {
+	if requireEnv && len(cfg.SSHs) == 0 {
 		return nil, fmt.Errorf("debug.sshs 未配置任何服务器环境(请在设置-环境-SSH 页添加)")
 	}
 	return cfg, nil

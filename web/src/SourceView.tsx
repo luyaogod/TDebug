@@ -24,7 +24,7 @@ export function SourceView() {
   const state = useStore((s) => s.state)
   const stop = useStore((s) => s.stop)
   const module = useStore((s) => s.module)
-  const theme = useStore((s) => s.theme)
+  const dark = useStore((s) => s.dark)
   const loadingSource = useStore((s) => s.loadingSource)
   const replayRowid = useStore((s) => s.lastReplayRowid)
   const prog = useStore((s) => s.prog)
@@ -247,7 +247,7 @@ export function SourceView() {
       <div className="relative min-h-0 flex-1">
         <Editor
           language="4gl"
-          theme={monacoThemeName(theme)}
+          theme={monacoThemeName(dark)}
           path={modelPath}
           value={content}
           beforeMount={setupMonaco}

@@ -14,6 +14,9 @@ description: 通过 TDebug 命令行调试 T100 ERP 作业(4GL/Genero)——对�
   tdebug serve --foreground   # 前台运行,日志直出终端(调试用)
   ```
   重复执行 serve 不会起第二个实例,只会提示已在运行;控制端命令(start/exec/…)自动发现后台实例真实地址。
+- 若用户开的是**桌面版**(TDebug.exe,Electron),不要另起 `serve`:桌面实例照写状态文件,
+  start/exec/… 会自动发现它并驱动同一个会话;停服务用 `tdebug serve --stop`(数据目录用 `--config` 指向
+  桌面的 config.json,安装版在 `%APPDATA%\TDebug`,免安装版在 exe 同目录)。
 - `config.json` 的 `debug` 节配置了 SSH 与区域
 - 作业的 GUI 界面会弹到用户的 GDC 上;断点命中时程序挂起,用户可在 GDC 操作后再继续
 

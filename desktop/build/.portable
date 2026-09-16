@@ -1,0 +1,15 @@
+TDebug 绿色(便携)版标记 —— 请不要删除本文件
+================================================
+
+有本文件在,TDebug 就把「配置 / 日志 / 断点 / 窗口位置」放在程序所在目录
+(exe 同目录),与命令行便携包完全一致:
+
+  config.json          SSH/区域/企业/数据库配置(含明文凭据,注意保护)
+  logs\desktop.log     后端运行日志(超过 2MB 自动轮转一份 desktop.log.1)
+  .tdebug-serve.json   运行状态(pid/地址/日志),命令行 tdebug status 也读它
+  window-state.json    窗口位置与大小
+  debug-bps\           断点持久化
+
+删掉本文件后:程序改回读 %APPDATA%\TDebug,而本目录里已有的配置就不再被读取
+(想换位置请连配置一起搬)。若本目录里已经有 config.json / logs / .tdebug-serve.json,
+即使删掉本文件也仍按绿色版处理,避免"配置突然不见了"。

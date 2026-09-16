@@ -7,7 +7,7 @@ cd /d "%~dp0"
 set STAGE=dist\tdebug-portable
 set GOPROXY=https://goproxy.cn,direct
 
-if exist dist rmdir /s /q dist
+if exist "%STAGE%" rmdir /s /q "%STAGE%"
 mkdir "%STAGE%"
 
 echo [1/4] Building web frontend ...

@@ -1,0 +1,45 @@
+# electron-builder 打包配置(Windows x64)
+#
+# 只出 **安装版**(NSIS);绿色/便携版由 build_desktop.bat 把解包目录压成 zip
+# (不再用 electron-builder 的 portable 目标:那个单文件 exe 长得像安装包,会误导用户)。
+# 只把 Go 后端当"额外资源"带进去(extraResources),前端界面在 Go 二进制内部
+# (go:embed web/dist),因此这里不打包任何 web 产物,也就不会出现"界面与 CLI 版不一致"。
+# 前提:先 `go build -o tdebug.exe .`(build_desktop.bat 会做)。
+appId: com.tdebug.desktop
+productName: TDebug
+copyright: TDebug
+
+# 直接用 node_modules 里已解压好的 electron(build_desktop.bat 会确保它存在):
+# 打包阶段不再下载/解压 electron 压缩包,既省时间也避开 Windows 上
+# "解压目录 rename 被占用(EPERM)"的偶发问题。
+electronDist: node_modules/electron/dist
+
+directories:
+  output: ../dist/desktop
+  buildResources: build
+
+files:
+  - main.js
+  - package.json
+  - build/icon.ico
+
+extraResources:
+  - from: ../tdebug.exe
+    to: tdebug.exe
+
+asar: true
+
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: TDebug
+  artifactName: TDebug-${version}-setup.${ext}

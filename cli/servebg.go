@@ -163,10 +163,38 @@ func logTail(logPath string, max int) string {
 	return string(buf)
 }
 
+// serveOpts 前台服务启动的可选行为(CLI `serve --foreground` 与桌面模式 `desktop` 共用同一套流程)。
+type serveOpts struct {
+	readyJSON bool // 额外打印一行机器可读就绪信息(TDEBUG_READY {json}),供桌面壳解析
+	quiet     bool // 不打印人类可读启动提示(桌面壳用 --json 时)
+}
+
+// desktopReadyMark 桌面壳解析的就绪行前缀(stdout 单行,便于逐行扫描)。
+const desktopReadyMark = "TDEBUG_READY "
+
+// desktopReady 就绪信息:URL 为实际监听地址(端口可能顺延),Attached=true 表示复用了已有实例。
+type desktopReady struct {
+	URL      string `json:"url"`
+	PID      int    `json:"pid"`
+	Config   string `json:"config"`
+	Log      string `json:"log,omitempty"`
+	Attached bool   `json:"attached,omitempty"`
+}
+
+func printDesktopReady(r desktopReady) {
+	b, _ := json.Marshal(r)
+	fmt.Println(desktopReadyMark + string(b))
+}
+
 // debugServeForeground 前台运行:阻塞到 Ctrl+C;同时写状态文件供 --stop 使用。
-// 作为后台子进程启动时(serve 默认模式),spawnDetached 会设 TDEBUG_SERVE_LOG 环境变量,
-// 状态文件里的日志路径据此填真实值;手动 --foreground 时为空(日志直出终端)。
 func debugServeForeground(cfg *debug.Config, cfgPath string) error {
+	return runServe(cfg, cfgPath, serveOpts{})
+}
+
+// runServe 启动并阻塞运行服务(写状态文件、端口顺延时提示、ctx 取消时优雅收尾)。
+// 作为后台子进程启动时(serve 默认模式),spawnDetached 会设 TDEBUG_SERVE_LOG 环境变量,
+// 状态文件里的日志路径据此填真实值;手动前台运行时为空(日志直出终端)。
+func runServe(cfg *debug.Config, cfgPath string, o serveOpts) error {
 	dir := filepath.Dir(cfgPath)
 	if st := runningInstance(dir); st != nil {
 		return fmt.Errorf("调试服务已在运行: %s (pid %d),如需重启请先执行 tdebug serve --stop", st.URL, st.PID)
@@ -179,7 +207,7 @@ func debugServeForeground(cfg *debug.Config, cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	if addr != requested {
+	if addr != requested && !o.quiet {
 		fmt.Printf("[tdebug] 端口 %s 被占用,自动改用 %s\n", requested, addr)
 	}
 	url := "http://" + addr
@@ -190,12 +218,17 @@ func debugServeForeground(cfg *debug.Config, cfgPath string) error {
 	_ = writeServeInfo(st, dir)
 	defer removeServeInfo(dir)
 
-	fmt.Printf("[tdebug] 服务已启动  前端+API: %s  (pid %d)\n", url, os.Getpid())
-	if logPath != "" {
-		fmt.Printf("  运行日志: %s\n", logPath)
-		fmt.Println("  停止服务: 另开终端执行 tdebug serve --stop")
-	} else {
-		fmt.Println("  按 Ctrl+C 停止")
+	if o.readyJSON {
+		printDesktopReady(desktopReady{URL: url, PID: os.Getpid(), Config: cfgPath, Log: logPath})
+	}
+	if !o.quiet {
+		fmt.Printf("[tdebug] 服务已启动  前端+API: %s  (pid %d)\n", url, os.Getpid())
+		if logPath != "" {
+			fmt.Printf("  运行日志: %s\n", logPath)
+			fmt.Println("  停止服务: 另开终端执行 tdebug serve --stop")
+		} else {
+			fmt.Println("  按 Ctrl+C 停止")
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

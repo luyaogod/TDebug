@@ -1,0 +1,21 @@
+{
+  "name": "tdebug-desktop",
+  "productName": "TDebug",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TDebug 桌面版:Electron 外壳 + 同一份 Go 服务(界面由 go:embed 的 web/dist 提供)",
+  "author": "TDebug",
+  "main": "main.js",
+  "scripts": {
+    "icon": "node scripts/make-icon.mjs",
+    "dev": "node dev.js",
+    "start": "electron .",
+    "smoke": "node scripts/smoke.mjs",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3"
+  }
+}

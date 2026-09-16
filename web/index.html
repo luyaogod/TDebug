@@ -5,8 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TDebug — T100 人机协同调试</title>
     <script>
-      // 首屏防闪色:渲染前按持久化设置挂 dark class(默认 dark)
-      if (localStorage.getItem('tdebug.theme') === 'light') document.documentElement.classList.remove('dark')
+      // 首屏防闪色:渲染前按持久化主题挂 dark class(默认暗色;支持 亮色/暗色/跟随系统)
+      ;(function () {
+        try {
+          var m = localStorage.getItem('tdebug.theme') || 'dark'
+          var dark = m === 'dark' || (m !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.classList.toggle('dark', dark)
+        } catch (e) { /* 读不到就保持默认暗色 */ }
+      })()
     </script>
   </head>
   <body>

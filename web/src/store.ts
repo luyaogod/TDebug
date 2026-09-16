@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { api, type Event, type StopInfo, type Breakpoint, type Frame, type VarItem, type WSLogItem, type WSLogContent, type WSLogQuery, type WSTestResult } from './api'
+import { THEME_KEY, applyDark, readStoredTheme, resolveDark, watchSystemTheme, type ThemeMode } from './theme'
+export type { ThemeMode }
 
 // timeline 条目(人/AI/系统 的操作与事件,可审计)
 export interface TimelineItem {
@@ -62,7 +64,8 @@ interface Store {
   runProg: string // gzzz_t 解析出的实体程序(源码命名/预取用);空 = 与 prog 相同
   // 视图与接口日志(VS Code 活动栏切换)
   view: 'debug' | 'wslogs' | 'wstest' | 'settings'
-  theme: 'dark' | 'light' // 外观主题(html.dark 挂点,localStorage tdebug.theme 持久化)
+  theme: ThemeMode // 外观选择:暗色/亮色/跟随系统(html.dark 挂点,localStorage tdebug.theme 持久化)
+  dark: boolean // 解析结果(system 时随系统变化);html.dark 与 Monaco 主题都按它渲染
   // 服务测试(复刻 awsq990 集成服务测试)
   wsTestMode: string // 1/2 awsp900, 3 awsp920, 4 awsp940, 5 awsp930
   wsTestUrl: string
@@ -106,7 +109,7 @@ interface Store {
   onEvent: (ev: Event) => void
   setView: (v: 'debug' | 'wslogs' | 'wstest' | 'settings') => void
   setLaunchError: (msg: string) => void
-  setTheme: (t: 'dark' | 'light') => void
+  setTheme: (t: ThemeMode) => void
   setActiveTab: (key: string) => void
   reveal: (key: string, line: number, nav?: boolean) => void
   closeTab: (key: string) => void
@@ -146,6 +149,9 @@ interface Store {
 
 let snapTimer: number | undefined
 let holdTimer: number | undefined
+
+// 主题的"用户选择"读一次即可:theme 与解析结果 dark 必须同源,别读两遍
+const initialTheme: ThemeMode = readStoredTheme()
 
 // 旧会话收口窗口:重放/重新开始都要先把上一个会话收口(同目标只结束本轮 = idle 复用宿主,
 // 不同目标直接断开),收口过程会上报 idle/exit/dead。宿主复用时新旧会话 ID 相同,这些收尾
@@ -217,7 +223,8 @@ export const useStore = create<Store>((set, get) => ({
   timeline: [], rawLog: [],
   runProg: '',
   view: 'debug',
-  theme: (localStorage.getItem('tdebug.theme') === 'light' ? 'light' : 'dark') as 'dark' | 'light',
+  theme: initialTheme,
+  dark: resolveDark(initialTheme),
   wsLogs: [], wsLogsLoading: false, wsLogsPage: 1, wsLogsHasMore: false,
   wsLogSel: null, wsLogContent: null, wsLogTab: 'info', wsLogErr: '',
   wsTestMode: '3', wsTestUrl: '', wsTestBody: '', wsTestSoap: false,
@@ -372,10 +379,12 @@ export const useStore = create<Store>((set, get) => ({
 
   setView: (v) => set({ view: v }),
   setLaunchError: (msg) => set({ launchError: msg }),
+  // 外观:选择 → 持久化 + 立即应用(跟随系统时 dark 取当前系统偏好)
   setTheme: (t) => {
-    localStorage.setItem('tdebug.theme', t)
-    document.documentElement.classList.toggle('dark', t === 'dark')
-    set({ theme: t })
+    const dark = resolveDark(t)
+    localStorage.setItem(THEME_KEY, t)
+    applyDark(dark)
+    set({ theme: t, dark })
   },
 
   setActiveTab: (key) => set({ activeTab: key }),
@@ -1053,6 +1062,15 @@ function startHoldTimer(set: (p: Partial<Store>) => void, get: () => Store) {
 function stopHoldTimer() {
   if (holdTimer) { clearInterval(holdTimer); holdTimer = undefined }
 }
+
+// 跟随系统:系统明暗变化时,只有"跟随系统"模式需要跟着动(dark 变 → html.dark 与 Monaco 一起变)
+watchSystemTheme(() => {
+  const st = useStore.getState()
+  if (st.theme !== 'system') return
+  const dark = resolveDark('system')
+  applyDark(dark)
+  useStore.setState({ dark })
+})
 
 // 连接 WebSocket(自动重连)
 export function connectWS() {

@@ -9,6 +9,8 @@
 
 - **Web 界面**（`tdebug serve` 后浏览器打开）：源码 + 断点 + 调用栈 + 变量监视（Monaco 编辑器、
   悬停求值、大纲、运行到光标），接口报文日志与重放调试，服务测试，环境/数据库/参数设置。
+  主题支持**亮色 / 暗色 / 跟随系统**（「设置 → 外观」三张卡片，跟随系统会随操作系统实时切换）；
+  还没有配置任何服务器环境时，打开界面直接落到「设置 → 环境」，不会把用户丢在空调试页。
 - **命令行控制端**：`start` / `exec` / `stop` / `source` / `logs` / `locate` / `resolve` / `interrupt`
   等，自动发现后台服务地址；`exec` 透传全部 fgldb 标准调试命令并返回原生文本。
 - **人机协同**：程序跑到 INPUT/MENU 等交互语句时会阻塞在 GDC 等人操作（从调试器看与死循环无法区分），
@@ -24,7 +26,35 @@ cd web && npm install && npm run build   # 生成 web/dist
 cd .. && go build -o tdebug.exe .
 ```
 
-Windows 一键打包（exe + config + README → dist/tddebug-portable.zip）：`build_portable.bat`
+Windows 一键打包，两种交付形态任选（互不影响，用的是同一个 `tdebug.exe`）：
+
+| 形态 | 命令 | 产物 |
+| --- | --- | --- |
+| **纯 CLI**（exe + config + README，浏览器用界面） | `build_portable.bat` | `dist/tdebug-portable.zip` |
+| **桌面软件**（Electron 外壳，免装浏览器） | `build_desktop.bat` | `dist/desktop/TDebug-<版本>-setup.exe`（安装版）、`dist/desktop/TDebug-<版本>-portable.zip`（绿色版，解压即用） |
+
+桌面版细节见 [`desktop/README.md`](desktop/README.md)。绿色版特意做成 **zip 而不是单文件 exe**：
+自解压 exe 长得像安装包，容易让人以为要先安装。
+
+### 桌面版（Electron）
+
+桌面版不复制界面：窗口加载的就是 Go 二进制里 `go:embed` 的 `web/dist`，所以与 CLI 版行为完全一致；
+Electron 只负责窗口、生命周期与打包。
+
+```powershell
+# 打包（前置:Node 18+；国内建议先设 electron 镜像）
+$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'
+build_desktop.bat
+
+# 开发（Vite 热更新 + 后端直出日志，数据目录 desktop/.dev-data）
+cd desktop; npm install; npm run dev
+```
+
+- 数据目录：绿色版（`-portable.zip` 解压后）= **程序所在目录**（与 CLI 便携包布局一致，可共用 config.json，
+  由包内 `.portable` 标记决定）；安装版 = `%APPDATA%\TDebug`。
+- 桌面窗口无原生菜单栏（界面自带工具栏）；`Ctrl+Shift+D` / `Ctrl+Shift+L` 打开配置目录 / 日志，其余快捷键见 desktop/README。
+- 端口：桌面版首启写 `127.0.0.1:28675`（CLI 版 28670），被占用自动顺延，真实地址见 `tdebug status`。
+- 关窗即优雅停止后端；CLI（`status`/`start`/`exec`…）能自动发现并驱动桌面版的会话，反之亦然。
 
 ## 快速开始
 
@@ -56,6 +86,7 @@ Windows 一键打包（exe + config + README → dist/tddebug-portable.zip）：
 | 命令 | 作用 |
 | --- | --- |
 | `serve` | 启动本地调试服务（默认后台常驻单实例；`--listen`/`--foreground`/`--stop`） |
+| `desktop` | 桌面模式（Electron 壳拉起）：自建数据目录/配置、允许未配环境、打印 `TDEBUG_READY {json}` |
 | `status` | 查看服务状态与活动会话 |
 | `start <作业>` | 连接 SSH、启动调试并等到入口停站（`--module/-m`、`--zone`、`--ssh`、`--timeout`） |
 | `exec "<fgldb命令>"` | 透传标准调试命令（print/break/next/where/info/watch…），原样返回输出 |
@@ -118,8 +149,11 @@ Windows 一键打包（exe + config + README → dist/tddebug-portable.zip）：
 | 变量 | 作用 |
 | --- | --- |
 | `TDEBUG_CONFIG` | 覆盖配置文件路径（优先级高于 `--config`） |
-| `TDEBUG_SERVE_LOG` | 后台服务子进程写入的日志路径（由 `serve` 自动设置） |
+| `TDEBUG_SERVE_LOG` | 后台服务子进程写入的日志路径（由 `serve`/桌面壳自动设置） |
 | `TDBG_RAW=1` | 把 fgldb 协议原始行打到服务日志（排障用） |
+| `TDEBUG_DESKTOP_DATA` | 桌面版数据目录（优先于便携/安装默认值；见 desktop/README.md） |
+| `TDEBUG_DESKTOP_PORT` | 桌面版监听地址覆盖（如 `127.0.0.1:0` 让系统分配） |
+| `ELECTRON_MIRROR` | 仅打包桌面版时用：electron 二进制下载镜像 |
 
 ### 运行时产物（均已在 .gitignore 中）
 
@@ -131,7 +165,7 @@ Windows 一键打包（exe + config + README → dist/tddebug-portable.zip）：
 
 ```
 main.go            入口:两个 go:embed(.claude/skills/*.md 与 all:web/dist)
-cli/               命令行:cobra 根命令 + 17 个调试子命令 + 后台守护(servebg_*)
+cli/               命令行:cobra 根命令 + 18 个调试子命令 + 后台守护(servebg_*)+ 桌面模式(desktop.go)
 debug/             调试核心:fgldb 协议驱动(session.go)、会话管理(manager.go)、
                    REST+WS 服务(api.go)、配置(config.go)、报文日志(wslog.go)、
                    服务测试(wstest.go)、DB 探查(db.go)、协议正则(parser.go)、断点存储(bpsstore.go)
@@ -139,12 +173,15 @@ host/              远程服务器共享层:SSH/PTY(ssh.go)、终端行解析(te
                    登录区动态路径探测(tenv.go)、DB 环境探测(dbprobe.go)、环境模型(env.go)
 dbconfig/  cfgfile/  erpdb/   数据库连接模型 / config.json 读写 / Oracle+金仓直连(连接测试)
 web/               前端(React 18 + Vite 6 + Monaco + Tailwind v4 + zustand)
+desktop/           Electron 桌面壳(主进程/开发启动器/打包配置/图标/冒烟脚本,见其 README)
+build_portable.bat 纯 CLI 便携包    build_desktop.bat 桌面安装包+免安装包
 .claude/skills/    AI 技能:tdebug-debug.md(tdebug install 可安装到其它项目)
 ```
 
 ## 注意
 
 - 同一时间只允许一个调试会话；`start`/`wsdebug` 会先结束旧会话。
-- 服务默认监听 `127.0.0.1:28670`；端口被占用时自动顺延并把真实地址写入状态文件，控制端命令无需关心。
+- 服务默认监听 `127.0.0.1:28670`（桌面版首启 `127.0.0.1:28675`）；端口被占用时自动顺延并把真实地址
+  写入状态文件，控制端命令与桌面壳都无需关心。
 - 只调试测试区；生产区下断点会让程序挂起，注意看门狗与行锁影响。
 - 调试链路需要能 SSH 登录的 T100 服务器与 Genero 运行环境（`fglrun -d` / `fgldb`）。

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -28,6 +29,10 @@ type Server struct {
 	webSub  fs.FS  // web/dist 子文件系统(未构建前端时为 nil)
 	addr    string // 实际监听地址(端口顺延时与 cfg.Listen 不同;不写回配置)
 	mgr     *Manager
+
+	// 停止钩子:Serve 期间指向该次运行的 cancel(POST /api/shutdown 用,桌面壳退出时优雅停止)
+	mu   sync.Mutex
+	stop func()
 }
 
 // NewServer 创建服务实例;cfgPath 为 config.json 路径(设置页写回用,可为空=只读)
@@ -75,8 +80,19 @@ func (s *Server) Listen() (net.Listener, string, error) {
 		addr := net.JoinHostPort(host, strconv.Itoa(port+i))
 		ln, err := net.Listen("tcp", addr)
 		if err == nil {
-			s.addr = addr
-			return ln, addr, nil
+			// 报出真实监听地址:--listen 端口写 0 时端口由系统分配,只能回读才知道;
+			// 端口顺延时同理(原来的 requested 端口只用来重试,不作为结果上报)。
+			// host 为空 = 监听全部网卡,那种地址浏览器/壳用不了,上报回环地址。
+			real := addr
+			if tcp, ok := ln.Addr().(*net.TCPAddr); ok {
+				h := host
+				if h == "" {
+					h = "127.0.0.1"
+				}
+				real = net.JoinHostPort(h, strconv.Itoa(tcp.Port))
+			}
+			s.addr = real
+			return ln, real, nil
 		}
 		lastErr = err
 	}
@@ -90,8 +106,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.routes(mux)
 	srv := &http.Server{Handler: mux}
 
+	// 记下本次运行的 cancel,供 POST /api/shutdown(桌面壳退出)优雅停止
+	runCtx, cancelRun := context.WithCancel(ctx)
+	s.setStop(cancelRun)
+	defer s.setStop(nil)
+
 	go func() {
-		<-ctx.Done()
+		<-runCtx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
@@ -105,6 +126,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	return err
 }
 
+// setStop 记录/清除本次运行的停止钩子。
+func (s *Server) setStop(f func()) {
+	s.mu.Lock()
+	s.stop = f
+	s.mu.Unlock()
+}
+
 // ListenAddr 返回实际监听地址(端口顺延时与配置值不同;未启动时返回配置值)。
 func (s *Server) ListenAddr() string {
 	if s.addr != "" {
@@ -115,6 +143,7 @@ func (s *Server) ListenAddr() string {
 
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/status", s.hStatus)
+	mux.HandleFunc("POST /api/shutdown", s.hShutdown)
 	mux.HandleFunc("GET /api/events", s.hEvents)
 	mux.HandleFunc("GET /api/source-file", s.hSourceFile)
 	mux.HandleFunc("GET /api/jobinfo", s.hJobInfo)
@@ -209,6 +238,27 @@ func (s *Server) hStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hEvents(w http.ResponseWriter, r *http.Request) {
 	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
 	writeJSON(w, 200, map[string]any{"ok": true, "events": s.mgr.Events(tail)})
+}
+
+// hShutdown 优雅停止服务:POST /api/shutdown {}。
+// 桌面壳(Electron)关闭窗口时用它,效果等同 Ctrl+C —— ctx 取消 → http 收口 + mgr.CloseAll
+// 收掉会话与 SSH 连接;CLI 侧仍走 `tdebug serve --stop`(按 pid)。
+// 要求 JSON 请求体(与全站一致):浏览器跨站发不出这个 Content-Type(会先被预检挡下),
+// 所以只有本机同源调用方能用,不额外加鉴权。
+func (s *Server) hShutdown(w http.ResponseWriter, r *http.Request) {
+	var req struct{}
+	if !readBody(w, r, &req) {
+		return
+	}
+	s.mu.Lock()
+	stop := s.stop
+	s.mu.Unlock()
+	if stop == nil {
+		fail(w, 409, fmt.Errorf("服务尚未就绪"))
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+	go stop() // 先回响应再停,避免调用方拿到连接重置
 }
 
 // hSourceFile 会话外白名单源码读取:GET /api/source-file?module=&file=&path=&from=&to=

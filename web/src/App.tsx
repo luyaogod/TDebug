@@ -86,6 +86,18 @@ function useDocTitleBlink() {
 
 export function App() {
   useDocTitleBlink()
+  // 还没有任何服务器环境时(桌面版首启、或本地还没配过):直接落到「设置 → 环境」,
+  // 而不是把用户丢在一个什么都干不了的调试页。设置页默认就停在「环境」分区。
+  // 只在本页首次加载时判一次,之后用户自己怎么切视图都不再干涉。
+  const jumpedRef = useRef(false)
+  useEffect(() => {
+    if (jumpedRef.current) return
+    jumpedRef.current = true
+    void api.settings().then((c) => {
+      const sshs = (c as { sshs?: unknown[] })?.sshs
+      if (!Array.isArray(sshs) || sshs.length === 0) useStore.getState().setView('settings')
+    }).catch(() => { /* 服务未就绪时不动:等用户自己操作 */ })
+  }, [])
   useEffect(() => {
     const close = connectWS()
     void api.status().catch(() => {})

@@ -59,7 +59,9 @@ export function setupMonaco() {
   })
 }
 
-/** 当前主题名(报文编辑器与源码编辑器用同一套主题 = 同一背景色) */
-export function monacoThemeName(theme: string): string {
-  return theme === 'light' ? 'tdebug-light' : 'tdebug-dark'
+/** 当前主题名(报文编辑器与源码编辑器用同一套主题 = 同一背景色)。
+ *  入参是"解析后的明暗"(store.dark):这样"跟随系统"时系统一变化编辑器也跟着换,
+ *  不会停在旧配色上。 */
+export function monacoThemeName(dark: boolean): string {
+  return dark ? 'tdebug-dark' : 'tdebug-light'
 }
