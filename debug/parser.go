@@ -45,15 +45,18 @@ var (
 	reNoSourceFile = regexp.MustCompile(`^No source file named`)
 	// 程序退出:`Program exited normally.` / `Program exited with code N.`(作业窗口被关闭或正常结束)
 	reProgramExited = regexp.MustCompile(`^Program exited`)
+	// reNotRunning fgldb 在 pre-run 态拒绝放行类命令时回的话。
+	// 单独具名是因为它还要用在一处**状态回滚**上(见 session.go 的 matchFdbErr 调用点):
+	// 命令被拒了,可 execOpt 发命令时已经把状态乐观翻成了 running。
+	reNotRunning = regexp.MustCompile(`^(The program is not being run|Program not being run)`)
 )
 
 // fdbErrRes 已知的调试器错误行(出现在响应中时转成命令错误)
 var fdbErrRes = []*regexp.Regexp{
 	reNoSymbol,
-	regexp.MustCompile(`^The program is not being run`),
+	reNotRunning,
 	regexp.MustCompile(`^No stack\.`),
 	regexp.MustCompile(`^Cannot execute this command`),
-	regexp.MustCompile(`^Program not being run`),
 	regexp.MustCompile(`^invalid argument`),
 	reNoLine,
 	reNoSourceFile,

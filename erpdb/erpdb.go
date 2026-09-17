@@ -3,13 +3,14 @@ package erpdb
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"tdebug/dbconfig"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"tdebug/safesql"
 )
 
 // Connector is a live connection to an ERP database (Kingbase/Oracle).
@@ -136,18 +137,12 @@ func (k *KingbaseConnector) Close() {
 	}
 }
 
-// checkReadOnlySQL 拒绝写入类与多语句,只允许单条只读 SELECT。
+// checkReadOnlySQL 只读校验 —— 统一到 safesql。
+//
+// 这里原来是一份**独立**的黑名单(前缀匹配 + 禁分号),而它是可绕过的:
+// `WITH x AS (…) DELETE`、`/*x*/DELETE`、`CALL`、注释穿插都能过。
+// 同一个工具里并存两套不一致的"只读"语义本身就是隐患 —— 何况弱的那套还在活路径上
+// (hConnTest 走的就是这里)。现在两边同一份实现、同一套测试。
 func checkReadOnlySQL(sql string) error {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	dangerous := []string{"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "REPLACE",
-		"ATTACH", "DETACH", "PRAGMA", "REINDEX", "VACUUM", "GRANT", "REVOKE"}
-	for _, kw := range dangerous {
-		if strings.HasPrefix(upper, kw) {
-			return fmt.Errorf("写入操作 '%s' 不被允许，仅允许 SELECT 查询", kw)
-		}
-	}
-	if strings.Contains(upper, ";") {
-		return fmt.Errorf("不允许多语句查询 (语句中含分号)，仅允许单条 SELECT 查询")
-	}
-	return nil
+	return safesql.Check(sql)
 }

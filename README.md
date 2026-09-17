@@ -104,6 +104,7 @@ cd desktop; npm install; npm run dev
 | `interrupt` | 中断运行中/卡住的程序，回到调试器 |
 | `env [环境名]` | 查看/切换当前生效的调试环境（SSH 配置） |
 | `topent [值]` | 查看/设置会话级 TOPENT override（`--clear` 清除） |
+| `sql "<语句>"` | 执行一条**只读** SQL 查业务数据（单条 SELECT/WITH；账号由 TOPENT 经 `gzou_t` 解析并在结果头回显「企业→账号」；白名单 + 库侧只读事务双重约束，最多回 200 行；`--ent` 指定企业、`--file` 从文件读；可用 `debug.sshs[].db.readonlySql=false` 关闭） |
 | `wslogs` | 接口报文日志列表（`--job` 作业编号(支持通配，按作业找日志用这个)、`--service` 服务名、`--server`、`--origin`、`--result`、`--pid`、`--from`/`--to`、`--fail`、`--page`、`--show <rowid>` 看单条报文；条件口径对齐 T100 原生 awsq990） |
 | `wsdebug <rowid>` | 按日志报文参数重放调试，停在入口；`--set 路径=值` 改入参再重放（可重复）、`--request-file` 整份替换报文；启动后打印实际生效的 TOPENT（它不是数字时会提示） |
 | `db [--ent N]` | 数据库连接探查：企业(TOPENT) → 账号映射与连接验证 |

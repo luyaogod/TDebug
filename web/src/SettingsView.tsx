@@ -23,6 +23,10 @@ interface SshDb {
   service: string // oracle: SERVICE_NAME
   database: string // kingbase: 库名
   accounts: { account: string; password: string }[]
+  // 是否允许 AI 执行只读 SQL(排查业务数据)。undefined = 未配置 = 开启;
+  // 显式 false 才关。**载入/保存都必须带上它** —— 否则在设置页点一次保存,
+  // 这个开关就被静默抹掉、悄悄变回开启(我实现时实测过)。
+  readonlySql?: boolean
 }
 
 interface SshItem {
@@ -152,6 +156,7 @@ export function SettingsView() {
             type: d.type || 'oracle', host: d.host || '', port: d.port || 0,
             service: d.service || '', database: d.database || '',
             accounts: (d.accounts || []).map((a: any) => ({ account: a.account || '', password: a.password || '' })),
+            readonlySql: d.readonlySql === false ? false : undefined,
           } : null,
         }
       }))
@@ -189,6 +194,8 @@ export function SettingsView() {
             else { if (x.db.database.trim()) db.database = x.db.database.trim() }
             const accounts = x.db.accounts.map((a) => ({ account: a.account.trim(), password: a.password })).filter((a) => a.account)
             if (accounts.length) db.accounts = accounts
+            // 只有"显式关掉"才写:没配 = 默认开启,不必往 JSON 里塞一堆 true
+            if (x.db.readonlySql === false) db.readonlySql = false
             o.db = db
           }
           return o
@@ -459,6 +466,20 @@ export function SettingsView() {
                           ) : (
                             <Field label="库名 (database)" className="col-span-2"><Input className={cell} placeholder="如 topprd" value={curDb.database} onChange={(e) => patchDb(selSsh, { database: e.target.value.trim() })} /></Field>
                           )}
+
+                          {/* 只读 SQL 开关:默认开启(未配置即开),显式关掉才写进配置 */}
+                          <label className="col-span-2 mt-1 flex cursor-pointer items-start gap-2 rounded border border-border bg-muted/30 px-3 py-2">
+                            <input type="checkbox" className="mt-0.5" checked={curDb.readonlySql !== false}
+                              onChange={(e) => patchDb(selSsh, { readonlySql: e.target.checked ? undefined : false })} />
+                            <span className="text-xs leading-relaxed">
+                              <span className="font-medium">允许 AI 执行只读 SQL(默认开启)</span>
+                              <span className="text-muted-foreground">
+                                　让 AI 能直接查业务数据、而不是靠反复重放去猜。账号由 TOPENT 决定(上错号会查不到数据,
+                                所以结果头会回显「企业→账号」)。语句受白名单 + 库侧只读事务双重约束,但仍挡不住
+                                <b>自治事务/函数副作用</b>这类"披着 SELECT 外衣的写",也挡不住账号本身跨 schema 的读权限。
+                              </span>
+                            </span>
+                          </label>
 
                           {/* 账号列表(无主账号;TOPENT 决定账号,密码查本表;逐行 Zap 可验证连接) */}
                           <div className="col-span-2 mt-1">

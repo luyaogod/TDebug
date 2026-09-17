@@ -52,9 +52,22 @@ type Connection struct {
 	Accounts []DBAcct `json:"accounts,omitempty"`
 	ViaSSH   *ViaSSH  `json:"viaSsh,omitempty"` // 可省:客户端不可达时经 SSH 隧道转发再直连
 
+	// ReadonlySQL 是否允许 AI 执行只读 SQL(排查业务数据用)。
+	// 用指针是为了区分"没配"(nil = 默认开启)与"显式关掉"(false)——
+	// 与 Config.PersistBPs 同款范式。关掉时端点直接 403,文案告诉用户改哪里。
+	ReadonlySQL *bool `json:"readonlySql,omitempty"`
+
 	// 内部直连凭据槽位(不持久化):客户端直连前由 DialCred 填入
 	User     string `json:"-"`
 	Password string `json:"-"`
+}
+
+// ReadonlySQLEnabled 只读 SQL 是否开启(未配置 = 开启)
+func (c *Connection) ReadonlySQLEnabled() bool {
+	if c == nil || c.ReadonlySQL == nil {
+		return true
+	}
+	return *c.ReadonlySQL
 }
 
 // DialCred 返回客户端直连凭据 = 账号列表首项(直连与 TOPENT 无关);

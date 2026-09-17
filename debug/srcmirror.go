@@ -108,16 +108,50 @@ func srcMirrorRoot(dataDir string) string {
 	return filepath.Join(dataDir, srcMirrorDir)
 }
 
-// clearMirror 清空整个镜像。每次启动调试前调用:
-// 代码会更新,跨轮次留下的文件只会误导下一轮的判断。
-// 清不掉不算错(可能还没建过),只记录。
+// execLogDir 命令完整输出的落盘目录(<DataDir>/execlog)。
+// 与源码镜像分开放:一个是"读过的源码",一个是"跑过的命令输出",生命周期相同但语义不同。
+const execLogDir = "execlog"
+
+// writeExecLog 把一次命令的完整输出落成本地文件,返回路径;写不进去返回空串。
+//
+// 为什么要有它:回给调用方的正文有上限(超了就只给头部),但"完整内容"必须留得住 ——
+// 否则想多看一点就得重跑命令,而重跑会改变现场。落本地之后可以随时 grep/整读,零往返。
+// 与镜像同款:原子落位、失败只记录不报错。
+func writeExecLog(dataDir, envSeg, name string, data []byte) string {
+	if dataDir == "" || name == "" {
+		return ""
+	}
+	dir := filepath.Join(dataDir, execLogDir, pathSafeSeg(envSeg))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("[execlog] 建目录失败 %s: %v", dir, err)
+		return ""
+	}
+	p := filepath.Join(dir, pathSafeSeg(name))
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		log.Printf("[execlog] 写失败 %s: %v", tmp, err)
+		return ""
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		log.Printf("[execlog] 落位失败 %s: %v", p, err)
+		return ""
+	}
+	return p
+}
+
+// clearMirror 清空本轮调试攒下的所有本地副本:
+//   - srccache/:读过的源码(代码会更新,跨轮次留着只会误导判断);
+//   - execlog/:跑过的命令输出(同理,而且它随轮次增长没有意义)。
+//
+// 每轮启动调试前调用,失败只记录。
 func clearMirror(dataDir string) {
-	root := srcMirrorRoot(dataDir)
-	if root == "" {
+	if dataDir == "" {
 		return
 	}
-	if err := os.RemoveAll(root); err != nil {
-		log.Printf("[srccache] 清理镜像失败 %s: %v", root, err)
+	for _, root := range []string{srcMirrorRoot(dataDir), filepath.Join(dataDir, execLogDir)} {
+		if err := os.RemoveAll(root); err != nil {
+			log.Printf("[srccache] 清理失败 %s: %v", root, err)
+		}
 	}
 }
 

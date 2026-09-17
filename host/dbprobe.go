@@ -37,14 +37,43 @@ func ZoneTNSName(zone string) string {
 	}
 }
 
-// chenvCmd 拼出"加载 zone 环境"的 bash 前缀(带参数不弹菜单,静默)
-func ChenvCmd(zone string) string {
-	return fmt.Sprintf("source /u3/pub/bin/chenv %s >/dev/null 2>&1", zone)
+// reToolPath 服务器上工具(sqlplus/ksql)的绝对路径白名单
+var reToolPath = regexp.MustCompile(`^[A-Za-z0-9_./-]{1,200}$`)
+
+// shQuote 单引号包裹并把内部的单引号按 POSIX 惯例闭合-转义-重开。
+// 凡是要作为"一个词"交给 shell 的值都走它。
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// bashLC 把一段脚本包成远端的 `bash -lc '<脚本>'`。
+// 脚本内部该用引号的地方自己用(见 shQuote);这里只负责把**整段脚本**转义进外层单引号。
+func bashLC(script string) string {
+	return "bash -lc '" + strings.ReplaceAll(script, "'", `'\''`) + "'"
+}
+
+// ChenvCmd 拼出"加载 zone 环境"的脚本片段(带参数不弹菜单,静默)。
+//
+// zone 来自配置与 --zone —— 都是"人给的字符串",而这个片段会被拼进远端 shell。
+// 以前它裸插且不在任何引号内:实测 `tdebug start --zone "36; id"` 能在服务器上执行任意命令。
+// 现在只放行白名单字符,所以不需要(也不能)再加引号 —— 加了反而与外层 bash -lc 的单引号打架。
+//
+// 返回的是**脚本片段**,由调用方用 bashLC 包起来。
+func ChenvCmd(zone string) (string, error) {
+	if zone == "" {
+		zone = "36"
+	}
+	if !reZone.MatchString(zone) {
+		return "", fmt.Errorf("区域代码非法(只允许字母数字与 _-,长度不超过 8): %q", zone)
+	}
+	return fmt.Sprintf("source /u3/pub/bin/chenv %s >/dev/null 2>&1", zone), nil
 }
 
 // probeDBEnv 在服务器上探测 ORACLE_HOME / sqlplus / TWO_TASK(chenv zone 后)
 func ProbeDBEnv(conn *SSHConn, zone string) (map[string]string, error) {
-	cmd := fmt.Sprintf(`bash -lc '%s; echo ORA=$ORACLE_HOME; echo SQLP=$(command -v sqlplus); echo TNSADM=$TNS_ADMIN; echo TWOTASK=$TWO_TASK'`, ChenvCmd(zone))
+	cenv, err := ChenvCmd(zone)
+	if err != nil {
+		return nil, err
+	}
+	cmd := bashLC(fmt.Sprintf(`%s; echo ORA=$ORACLE_HOME; echo SQLP=$(command -v sqlplus); echo TNSADM=$TNS_ADMIN; echo TWOTASK=$TWO_TASK`, cenv))
 	out, err := conn.Output(cmd, 25*time.Second)
 	if err != nil && out == "" {
 		return nil, fmt.Errorf("探测数据库环境失败: %w", err)
@@ -112,26 +141,61 @@ echo KPORT=${PORT:-54321}
 	return env, nil
 }
 
-// kbCmd 拼出在服务器上执行 ksql 的命令(显式 host/port/db;KINGBASE_PASSWORD 传密)
-func KbCmd(ksqlPath, host, port, db, connStr, sql string) string {
-	q := strings.ReplaceAll(sql, `"`, `\"`)
+// reDBAcct 数据库账号名白名单(T100 用 ds/dsdemo/dsdata 这类)
+var reDBAcct = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_$#]{0,29}$`)
+
+// KbCmd 产出在服务器上执行 ksql 的**命令行**(不含 SQL)。
+//
+// SQL 由调用方经 conn.OutputStdin 从 stdin 喂进去 —— 见 ssh.go 的 OutputStdin。
+// 以前这里把 SQL 拼进 `-c "…"` 且只转义双引号($、反引号、\ 都没管),是一条命令注入面。
+func KbCmd(ksqlPath, host, port, db, connStr string) (string, error) {
+	if !reToolPath.MatchString(ksqlPath) {
+		return "", fmt.Errorf("ksql 路径非法: %q", ksqlPath)
+	}
 	user, pass := connStr, connStr
 	if i := strings.Index(connStr, "/"); i >= 0 {
 		user, pass = connStr[:i], connStr[i+1:]
 	}
-	return fmt.Sprintf(`KINGBASE_PASSWORD=%s %s -w -h %s -p %s -U %s -d %s -t -A -F '|' -c "%s"`,
-		pass, ksqlPath, host, port, user, db, q)
+	if !reDBAcct.MatchString(user) {
+		return "", fmt.Errorf("数据库账号非法: %q", user)
+	}
+	if strings.ContainsAny(pass, "\n\r\x00") {
+		return "", fmt.Errorf("数据库口令含非法字符(换行/空字符)")
+	}
+	// 口令只能作为环境变量前缀传;它仍会出现在远端的 argv 里(ps 可见)——
+	// 这是既有行为,文件头注释以前写成"走 stdin 不进命令行",与实现不符,已改正。
+	return fmt.Sprintf(`KINGBASE_PASSWORD=%s %s -w -h %s -p %s -U %s -d %s -t -A -F '|'`,
+		shQuote(pass), ksqlPath, shQuote(host), shQuote(port), shQuote(user), shQuote(db)), nil
 }
 
-// sqlplusRun 拼出在服务器上执行 sqlplus 的命令:chenv zone 提供运行环境,
-// 连接串为显式 EZCONNECT "账号/密码@//host:port/service";sqlplusPath 空则用 PATH 内 sqlplus
-func SqlplusRun(zone, sqlplusPath, connStr, sql string) string {
-	q := strings.ReplaceAll(sql, "'", "'\\''")
+// SqlplusCmd 产出在服务器上执行 sqlplus 的**命令行**(不含 SQL)。
+//
+// SQL 由调用方经 conn.OutputStdin 从 stdin 喂进去。以前这里是
+// `echo "<SQL>" | sqlplus` 再整体套 `bash -lc '...'`:两层解析,第二层里 $()/反引号
+// 照常展开,一个引号就能把后面的 ; | 变成命令分隔符 —— 是完整的命令注入,不是理论风险。
+//
+// killAfterSec > 0 时套一层远端 `timeout -s TERM N`:Oracle 侧没有任何服务端超时机制,
+// 本地 SSH 层的超时又只是"不再等"、不杀进程(靠 sshd 回收,不确定),所以这一步是必须的。
+func SqlplusCmd(zone, sqlplusPath, connStr string, killAfterSec int) (string, error) {
+	env, err := ChenvCmd(zone)
+	if err != nil {
+		return "", err
+	}
 	p := sqlplusPath
 	if p == "" {
 		p = "sqlplus"
 	}
-	return fmt.Sprintf(`bash -lc '%s; echo "%s" | %s -S %s'`, ChenvCmd(zone), q, p, connStr)
+	if !reToolPath.MatchString(p) {
+		return "", fmt.Errorf("sqlplus 路径非法: %q", p)
+	}
+	if strings.ContainsAny(connStr, "\n\r\x00") {
+		return "", fmt.Errorf("连接串含非法字符(换行/空字符)")
+	}
+	tool := p
+	if killAfterSec > 0 {
+		tool = fmt.Sprintf("timeout -s TERM %d %s", killAfterSec, p)
+	}
+	return bashLC(fmt.Sprintf("%s; exec %s -S %s", env, tool, shQuote(connStr))), nil
 }
 
 // parseTNS 解析服务器 tnsnames.ora 里 TNS 别名的地址/服务(「从服务器获取」辅助用)
@@ -300,7 +364,11 @@ func VerifyDBAcct(req DBAccVerifyReq) error {
 		if db == "" {
 			return fmt.Errorf("缺少库名(dbDatabase)")
 		}
-		out, err = conn.Output(KbCmd(ksql, host, port, db, creds, `select 'OK'`), 30*time.Second)
+		kbCmdLine, kerr := KbCmd(ksql, host, port, db, creds)
+		if kerr != nil {
+			return kerr
+		}
+		out, err = conn.OutputStdin(kbCmdLine, []byte("select 'OK';\n"), 30*time.Second)
 	} else {
 		zone := req.Zone
 		if zone == "" {
@@ -317,9 +385,14 @@ func VerifyDBAcct(req DBAccVerifyReq) error {
 		if port == 0 {
 			port = 1521
 		}
-		sql := "set heading off\nset feedback off\nselect 'OK' from dual;"
 		addr := net.JoinHostPort(host, strconv.Itoa(port)) + "/" + req.DBSvc
-		out, err = conn.Output(SqlplusRun(zone, "", creds+"@//"+addr, sql), 30*time.Second)
+		spCmdLine, serr := SqlplusCmd(zone, "", creds+"@//"+addr, 0)
+		if serr != nil {
+			return serr
+		}
+		// SQL 走 stdin(以前是 echo "<SQL>" 拼进命令行,见 SqlplusCmd 的注释)
+		out, err = conn.OutputStdin(spCmdLine,
+			[]byte("set heading off\nset feedback off\nselect 'OK' from dual;\nexit\n"), 30*time.Second)
 	}
 	if err != nil {
 		return fmt.Errorf("连接失败: %s", FirstLines(out, 4))

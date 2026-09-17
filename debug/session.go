@@ -123,6 +123,13 @@ type execResult struct {
 	// SoftTimeout:软等待到点返回(程序仍在跑,命令没有被取消、也没发 SIGINT)。
 	// 区别于 exec 返回的硬超时 error —— 那条路径会发 \x03 探测。
 	SoftTimeout bool `json:"softTimeout,omitempty"`
+
+	// Truncated/TruncReason:这条命令的响应**在会话层就被截断过**
+	// (行数超 maxPendingLines,或单个 print 值超 maxValueBytes)。
+	// 以前这对标记只用来"只标一次"、从不对外暴露 —— 于是调用方拿到的是被砍过的内容
+	// 却毫不知情,会当成全部。现在如实带出去。
+	Truncated   bool   `json:"truncated,omitempty"`
+	TruncReason string `json:"truncReason,omitempty"` // lines | value
 }
 
 type pendingCmd struct {
@@ -249,6 +256,12 @@ type Session struct {
 	booted         bool   // 是否已完成首次登录(菜单→shell),宿主可复用
 	shellReady     bool   // pty 当前停在 shell 提示符,可直接敲 shell 命令
 	topentOverride string // 会话内手动设置的 TOPENT(空 = 未设置,按配置默认)
+
+	// ---- 重放调试 ----
+	// replayRspPath 本次重放把响应写到哪个服务器临时文件(LaunchReplay 填)。
+	// 程序退出前它还不存在,所以只能等跑完再读(见 loadReplayResponse)。
+	replayRspPath  string
+	replayResponse string // 读回来的响应原文(只读一次)
 
 	// mode 谁在驾驶:ModeSolo(纯人工,默认) | ModeCollab(协作,AI 主导)。
 	// 由发起方决定,之后靠界面上的接管/交给 AI 按钮切换 —— 不做逐命令协商。
@@ -644,6 +657,43 @@ func (s *Session) SetRun(cfg *Config, module, prog, runProg, launchRef, extra st
 	s.custModule = ""
 }
 
+// maxReplayRespBytes 回显重放响应时的字节上限(超了只回头部)
+const maxReplayRespBytes = 32 << 10
+
+// ReplayResponse 本次重放产生的响应原文(空 = 还没跑完 / 不是重放会话)
+func (s *Session) ReplayResponse() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.replayResponse
+}
+
+// loadReplayResponse 程序跑完后把本次重放的响应报文读回来,只读一次。
+//
+// 为什么只能在这里读:重放的响应是**程序退出时**才写到服务器临时文件里的,
+// 停在入口或断点时那个文件还不存在。以前想看它只能"停在收尾断点再 continue 到 exit",
+// 从程序 stdout 里抓 —— 这次把它接成一条正常通道。
+func (s *Session) loadReplayResponse() {
+	s.mu.Lock()
+	p := s.replayRspPath
+	already := s.replayResponse != ""
+	s.mu.Unlock()
+	if p == "" || already {
+		return
+	}
+	data, _, err := s.ReadFile(p)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	txt := string(data)
+	if len(txt) > maxReplayRespBytes {
+		txt = txt[:maxReplayRespBytes] + "…(响应过长,已截断)"
+	}
+	s.mu.Lock()
+	s.replayResponse = txt
+	s.mu.Unlock()
+	s.emitEvent(Event{Type: "log", Text: "本次重放产生的响应:" + txt})
+}
+
 // TopentOverride 会话内手动设置的 TOPENT(空 = 未设置,按配置默认)
 func (s *Session) TopentOverride() string {
 	s.mu.Lock()
@@ -678,6 +728,16 @@ func (s *Session) topentForRun() string {
 		return s.topentOverride
 	}
 	return strings.TrimSpace(string(s.cfg.Topent))
+}
+
+// TopentIntForDB 该会话实际生效的**企业编号**,供只读 SQL 决定用哪个账号连库。
+//
+// 非数字(例如把据点码填进了企业编号的位置)返回 0 —— 调用方要据此明确拒绝,
+// 而不是拿一个错的编号去查库:查错 schema 的结果是 0 行,而 0 行会被读成
+// "这条业务数据不存在",那是最危险的错误结论。
+func (s *Session) TopentIntForDB() int {
+	n, _ := host.EntValue(s.topentForRun()).Int()
+	return n
 }
 
 // SetTopent 空闲态重新设置宿主 shell 的 TOPENT(空值 = 清除手动覆盖,回到环境默认 TOPENT)。
@@ -763,6 +823,9 @@ func (s *Session) enterIdle(logMsg string) {
 	s.lastAutovars = nil
 	s.mu.Unlock()
 	s.stopWatchdog()
+	// 重放调试:程序跑完了,把它的响应报文读回来(以前只能靠"停在收尾断点再 continue"
+	// 从 stdout 里抓,很绕)。异步读,别堵住协议泵。
+	go s.loadReplayResponse()
 	if !wasIdle {
 		s.emitEvent(Event{Type: "state", State: string(StateIdle)})
 	}
@@ -1395,6 +1458,17 @@ func (s *Session) completePending(r *execResult) {
 	}
 	if len(r.Lines) == 0 {
 		r.Lines = p.lines
+	}
+	// 截断标记统一在这里带上:调用方(断点/步进/软超时…)有好几处,逐个加容易漏
+	if p.linesTrunc {
+		r.Truncated = true
+		if r.TruncReason == "" {
+			r.TruncReason = "lines"
+		}
+	}
+	if p.valueTrunc {
+		r.Truncated = true
+		r.TruncReason = "value"
 	}
 	select {
 	case p.res <- r:
@@ -2133,6 +2207,14 @@ func (s *Session) onLine(ln string) {
 
 		if e := matchFdbErr(ln); e != "" && pending.errText == "" {
 			pending.errText = e
+			// 兜底回滚:放行类命令在 pre-run 态会被 fgldb 拒("The program is not being run")。
+			// execOpt 发出命令时把状态**乐观**翻成 running 是对的(命令确实发出去了),
+			// 但被拒之后那条"乐观"就是假的:状态会永远停在 running,于是 interrupt 因
+			// "未启动"被拒、exec 因"运行中"被拒、EndRun 的中断同样失败 —— 只能整体断开会话。
+			// 真机踩过。这里把状态退回 stopped,并把拒绝如实留在 pending.errText 里。
+			if reNotRunning.MatchString(e) && IsResumeCmd(pending.cmd) && !s.started {
+				s.setState(StateStopped)
+			}
 		}
 
 		switch pending.kind {

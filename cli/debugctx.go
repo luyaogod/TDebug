@@ -79,6 +79,11 @@ var debugStopCmd = &cobra.Command{
 		if s.State != "stopped" && s.State != "" {
 			fmt.Println("(未停站;可用 tdebug start/exec 或先观察会话状态)")
 		}
+		// 重放调试跑完后,程序自己写出的响应原文 —— 以前只能"停在收尾断点再 continue
+		// 到 exit"从 stdout 里抓。放在这里是因为它属于"看一眼当前现场"的一部分。
+		if rr, _ := full["replayResponse"].(string); rr != "" {
+			fmt.Printf("\n── 本次重放产生的响应(%d 字符)──\n%s\n", len(rr), rr)
+		}
 		return nil
 	},
 }

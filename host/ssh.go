@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -100,23 +101,45 @@ func (c *SSHConn) SFTP() (*sftp.Client, error) {
 // Output 执行一次性命令并返回合并输出(模块解析等轻量查询用;
 // exec 通道不经过登录 profile,不能用于依赖 T100 环境变量的操作)
 func (c *SSHConn) Output(cmd string, timeout time.Duration) (string, error) {
+	return c.run(cmd, nil, timeout)
+}
+
+// OutputStdin 同 Output,额外把 data 从 **stdin** 喂给远端命令。
+//
+// 存在的理由:凡是"数据"(SQL 脚本、报文…)都不该拼进命令行 —— 命令行会被服务器上的
+// shell 再解析一遍,数据里的 $()/反引号/引号都会在那里展开(以前 sqlplus 那条路就是
+// echo "<SQL>" 再套一层 bash -lc,是完整的命令注入)。走 stdin 之后,命令串里只剩本工具
+// 自己控制的常量,这一类问题从根上不存在。
+func (c *SSHConn) OutputStdin(cmd string, stdin []byte, timeout time.Duration) (string, error) {
+	return c.run(cmd, bytes.NewReader(stdin), timeout)
+}
+
+// run 执行/超时的公共实现。输出与错误经 channel 传出 —— 原实现直接写外层变量,
+// 超时分支返回后 goroutine 仍在写它,是一处数据竞争(go test -race 能报)。
+func (c *SSHConn) run(cmd string, stdin io.Reader, timeout time.Duration) (string, error) {
 	sess, err := c.cli.NewSession()
 	if err != nil {
 		return "", err
 	}
 	defer sess.Close()
-	done := make(chan error, 1)
-	var out []byte
+	if stdin != nil {
+		sess.Stdin = stdin
+	}
+	type res struct {
+		out []byte
+		err error
+	}
+	done := make(chan res, 1)
 	go func() {
-		out, err = sess.CombinedOutput(cmd)
-		done <- err
+		out, err := sess.CombinedOutput(cmd)
+		done <- res{out, err}
 	}()
 	select {
-	case e := <-done:
-		if e != nil {
-			return string(out), e
+	case r := <-done:
+		if r.err != nil {
+			return string(r.out), r.err
 		}
-		return string(out), nil
+		return string(r.out), nil
 	case <-time.After(timeout):
 		return "", fmt.Errorf("命令超时: %s", cmd)
 	}

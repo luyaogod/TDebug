@@ -42,6 +42,12 @@ type Manager struct {
 	// 每次 tdebug source/grep 重新握手太贵,按 SSH 目标缓存一条长连接。
 	srcMu sync.Mutex
 	src   *srcConn
+
+	// 企业→账号映射的缓存(见 dbsql.go):只读 SQL 每次都要先查一次 gzou_t,
+	// 同一个 (主机,账号,区域) 下缓存 10 分钟。**只缓存映射,不缓存账号选择** ——
+	// 选哪个企业每次都由调用方现给,缓存错了就是"上错号"。
+	entMu    sync.Mutex
+	entCache map[string]sqlEntCacheEntry
 }
 
 // maxBufferedEvents 环形缓冲上限。
@@ -58,6 +64,7 @@ func NewManager(cfg *Config) *Manager {
 		sessions: map[string]*Session{},
 		subs:     map[chan Event]string{},
 		envCache: map[string]cachedEnv{},
+		entCache: map[string]sqlEntCacheEntry{},
 		Epoch:    strconv.FormatInt(time.Now().UnixNano(), 36),
 	}
 }
@@ -385,6 +392,11 @@ func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent, reqOverri
 	if reqOverride != "" {
 		sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放使用界面修改后的入参(%d 字节),已写入 %s", len(reqOverride), reqPath)})
 	}
+	// 记下响应会落到哪:程序退出后要把它读回来回显(见 loadReplayResponse)。
+	// 响应文件是程序退出时才写的,所以只能等跑完再读 —— 停在入口/断点时它还不存在。
+	sess.mu.Lock()
+	sess.replayRspPath = rspPath
+	sess.mu.Unlock()
 	sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放 %s:fglrun -d %s %s", item.Service, runProgOr(job, runProg), args)})
 	return sess, replayWarn, nil
 }

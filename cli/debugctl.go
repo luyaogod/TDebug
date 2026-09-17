@@ -43,6 +43,10 @@ var (
 	dbgWaitFor  string // wait 命令:等哪些事件
 	dbgNoResume bool   // why 命令:探测完不自动放回运行
 
+	dbgExecMax int    // exec --max:单条命令**显示**的行数上限(0=不限;不影响本地完整副本)
+	dbgSQLFile string // sql --file:从本地文件读语句(不是远端 @)
+	dbgSQLEnt  int    // sql --ent:显式指定企业编号(默认取会话 TOPENT)
+
 	wsShow         string   // wslogs --show <rowid>:只看这一条的报文
 	wsSaveReq      string   // wslogs --show --save-request:把请求原文另存一份(改完再 --request-file)
 	wsDebugSet     []string // wsdebug --set k=v:改一个入参再重放(可重复)
@@ -272,6 +276,51 @@ type rawOut struct {
 	SoftTimeout bool     `json:"softTimeout"`
 	State       string   `json:"state"`
 	Silent      float64  `json:"silentSeconds"`
+	// 会话层就截断过(行数/单值超上限);以及完整输出的本地副本路径
+	Truncated   bool   `json:"truncated"`
+	TruncReason string `json:"truncReason"`
+	LocalPath   string `json:"localPath"`
+	TotalLines  int    `json:"totalLines"`
+}
+
+// applyMax 按 --max 裁剪要打印的行(只影响**显示**,不影响落盘的那种完整副本)
+func applyMax(lines []string, max int) ([]string, bool) {
+	if max <= 0 || len(lines) <= max {
+		return lines, false
+	}
+	return lines[:max], true
+}
+
+// printLines 打印一条命令的输出,并按上限裁剪 + 说明完整副本在哪。
+//
+// 这是"别把 AI 上下文打爆"的落点:正文只给头部,完整内容留在本地可随时 grep。
+// 少了任何一句提示,收到的就只是"被截断的内容",而调用方会以为那就是全部。
+func printLines(r *rawOut) {
+	shown, cut := applyMax(r.Lines, dbgExecMax)
+	for _, ln := range shown {
+		fmt.Println(ln)
+	}
+	if r.Truncated {
+		what := "行数"
+		if r.TruncReason == "value" {
+			what = "单值长度"
+		}
+		fmt.Printf("⚠ 会话层已按%s上限截断过(超出部分没传回来)\n", what)
+	}
+	switch {
+	case cut:
+		fmt.Printf("…(共 %d 行,只显示前 %d 行", len(r.Lines), len(shown))
+	case r.LocalPath != "":
+		fmt.Printf("(输出 %d 行", len(r.Lines))
+	default:
+		return
+	}
+	if r.LocalPath != "" {
+		fmt.Printf(";完整副本: %s", r.LocalPath)
+	} else if cut {
+		fmt.Printf(";要看全部加 --max 0")
+	}
+	fmt.Println(")")
 }
 
 // dbgRawOnce 透传一条 fgldb 命令
@@ -303,9 +352,7 @@ func dbgExecOne(id, cmd string) error {
 	if err != nil {
 		return err
 	}
-	for _, ln := range r.Lines {
-		fmt.Println(ln)
-	}
+	printLines(r)
 	if r.SoftTimeout {
 		printStillRunning(r)
 		return nil
@@ -335,9 +382,7 @@ func dbgExecBatch(id string, cmds []string) error {
 		if len(r.Lines) == 0 {
 			fmt.Println("(无输出)")
 		}
-		for _, ln := range r.Lines {
-			fmt.Println(ln)
-		}
+		printLines(r)
 		// 放行类命令让程序离开当前停站点。它可能停在了**新的**停站点(那就能接着取值),
 		// 也可能还在跑、也可能已经退出 —— 读一次快照看实况,别靠猜。
 		// 停住了的话 dbgFetchStopSite 顺带把现场打一行出来,后一条命令就建立在已知现场上。
@@ -954,6 +999,103 @@ func showWSLog(rowid string, asJSON bool, reqSave string) error {
 	return nil
 }
 
+// debugSQLCmd 只读 SQL:查业务数据("这个料号在主表里到底有没有")
+var debugSQLCmd = &cobra.Command{
+	Use:          `sql "<查询语句>"`,
+	Short:        "执行一条只读 SQL(账号由 TOPENT 决定;白名单 + 库侧只读事务双重约束)",
+	SilenceUsage: true, // 报错多为运行期(白名单拒绝/库上出错),不是用法问题
+	Long: `对当前环境查一条**只读** SQL,用来回答"这条业务数据到底有没有/是什么" ——
+排查接口失败时,靠改入参反复重放去反推太慢,这里能直接看一眼。
+
+  tdebug sql "select bmaa001,bmaastus from bmaa_t where bmaa001='FCPU010100003'"
+  tdebug sql --file q.sql              # 长语句从本地文件读
+  tdebug sql "select * from t" --ent 100   # 显式指定企业(默认取会话的 TOPENT)
+
+**账号由企业编号(TOPENT)决定**,不需要你操心 —— 而且结果头部会把
+「企业 N → 账号 X」打印出来。觉得查不到数据时先看这一行:企业编号错了就会查到
+另一个 schema、拿到 0 行,那看起来和"数据不存在"一模一样。
+
+限制(都是刻意的,不是没做):
+  - 只允许**单条** SELECT / WITH;写操作、DDL、PL/SQL 块、多语句、sqlplus 命令一律拒绝;
+  - 库会话是只读事务,常规写会被库自己挡回去;
+  - **最多回 200 行**。要更多请加 WHERE 收窄 —— 工具不提供整表导出。
+
+挡不住的(别当成绝对安全):自治事务/函数副作用这类"披着 SELECT 外衣的写",
+以及"只读 ≠ 只读该企业的数据"(账号常有跨 schema 授权)。`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sqlText := ""
+		if len(args) == 1 {
+			sqlText = strings.TrimSpace(args[0])
+		}
+		if dbgSQLFile != "" {
+			b, err := os.ReadFile(dbgSQLFile)
+			if err != nil {
+				return fmt.Errorf("读取语句文件失败: %s: %w", dbgSQLFile, err)
+			}
+			if sqlText != "" {
+				return fmt.Errorf("语句既给了位置参数又给了 --file,二选一")
+			}
+			sqlText = strings.TrimSpace(string(b))
+		}
+		if sqlText == "" {
+			return fmt.Errorf(`需要一条查询语句(见 tdebug sql --help),或用 --file 指定语句文件`)
+		}
+		body := map[string]any{"sql": sqlText, "ent": dbgSQLEnt}
+		if dbgTimeout > 0 {
+			body["timeout"] = dbgTimeout
+		}
+		data, err := dbgAPI("POST", "/api/dbsql", body)
+		if err != nil {
+			return err
+		}
+		if IsJSON() {
+			fmt.Println(string(data))
+			return nil
+		}
+		var r struct {
+			Result struct {
+				Ent           int        `json:"ent"`
+				Account       string     `json:"account"`
+				Dialect       string     `json:"dialect"`
+				Columns       []string   `json:"columns"`
+				Rows          [][]string `json:"rows"`
+				TotalRows     int        `json:"totalRows"`
+				Truncated     bool       `json:"truncated"`
+				ServerLimited bool       `json:"serverLimited"`
+				Elapsed       float64    `json:"elapsedSeconds"`
+				Notes         []string   `json:"notes"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(data, &r); err != nil {
+			return err
+		}
+		res := r.Result
+		// 这一行是**必须**的:查不到数据时,先要能一眼看出是不是上错了号
+		fmt.Printf("企业 %d → 账号 %s(%s,只读事务,用时 %.2fs)\n", res.Ent, res.Account, res.Dialect, res.Elapsed)
+		for _, n := range res.Notes {
+			fmt.Printf("  注:%s\n", n)
+		}
+		if len(res.Columns) == 0 {
+			fmt.Println("(无结果集)")
+			return nil
+		}
+		fmt.Println(strings.Join(res.Columns, " | "))
+		for _, row := range res.Rows {
+			fmt.Println(strings.Join(row, " | "))
+		}
+		switch {
+		case res.Truncated:
+			fmt.Printf("— 共返回 %d 行,只显示前 %d 行。要更多请加 WHERE 收窄。\n", res.TotalRows, len(res.Rows))
+		case len(res.Rows) == 0:
+			fmt.Println("— 0 行。注意:上错号也会是 0 行,先核对上面那行的企业编号。")
+		default:
+			fmt.Printf("— %d 行\n", len(res.Rows))
+		}
+		return nil
+	},
+}
+
 // debugWsdebugCmd 对指定日志发起重放调试
 var debugWsdebugCmd = &cobra.Command{
 	SilenceUsage: true, // 报错多为运行期(状态/SSH/库),不是用法问题:别打一大段 usage 误导
@@ -1031,7 +1173,11 @@ func init() {
 	debugExecCmd.Flags().IntVar(&dbgTimeout, "timeout", 90, "等待停站超时(秒,对批量里的**每一条**生效);到点发 SIGINT 探测,所以长命令建议改用 --wait")
 	debugExecCmd.Flags().IntVar(&dbgSoftWait, "wait", 0, "软等待秒数(对每一条生效):到点若程序仍在跑就直接返回(不发 SIGINT、不取消命令);0=不启用")
 	debugExecCmd.Flags().StringVar(&dbgExecFile, "file", "", "命令文件:一行一条,空行与 # 开头跳过(与位置参数并用时位置参数在前)")
+	debugExecCmd.Flags().IntVar(&dbgExecMax, "max", 2000, "单条命令**显示**的行数上限(0=不限)。超出的部分不打印,但完整输出会落本地并给出路径")
 	debugStartCmd.Flags().IntVar(&dbgTimeout, "timeout", 120, "等待入口停站超时(秒)")
+	debugSQLCmd.Flags().StringVar(&dbgSQLFile, "file", "", "从本地文件读查询语句(长语句用)")
+	debugSQLCmd.Flags().IntVar(&dbgSQLEnt, "ent", 0, "企业编号(默认取会话的 TOPENT;结果头会回显实际用的企业与账号)")
+	debugSQLCmd.Flags().IntVar(&dbgTimeout, "timeout", 0, "查询超时秒数(默认 30,上限 120)")
 	debugWsdebugCmd.Flags().IntVar(&dbgTimeout, "timeout", 150, "等待入口停站超时(秒)")
 	debugWsdebugCmd.Flags().StringArrayVar(&wsDebugSet, "set", nil, "改一个入参再重放:路径=值(可重复;路径形如 digi-body.std_data.parameter.x;等号后留空即清空该字段)")
 	debugWsdebugCmd.Flags().StringVar(&wsDebugReqFile, "request-file", "", "整份替换入参报文(与 --set 并用时以它为底稿)")
@@ -1054,6 +1200,6 @@ func init() {
 	debugWslogsCmd.Flags().BoolVar(&wsJSON, "json", false, "输出原始 JSON")
 	debugWslogsCmd.Flags().StringVar(&wsShow, "show", "", "只看这一条:按 rowid 打印详情与请求/响应报文(不看列表)")
 	debugWslogsCmd.Flags().StringVar(&wsSaveReq, "save-request", "", "配合 --show:把请求原文存成文件(报文是 XML 时改入参只能走这条路)")
-	addClientURLFlag(debugStartCmd, debugExecCmd, debugStatusCmd, debugQuitCmd, debugWslogsCmd, debugWsdebugCmd, debugWhyCmd, debugWaitCmd, debugModeCmd)
-	rootCmd.AddCommand(debugStartCmd, debugExecCmd, debugStatusCmd, debugQuitCmd, debugWslogsCmd, debugWsdebugCmd, debugWhyCmd, debugWaitCmd, debugModeCmd)
+	addClientURLFlag(debugStartCmd, debugExecCmd, debugStatusCmd, debugQuitCmd, debugWslogsCmd, debugSQLCmd, debugWsdebugCmd, debugWhyCmd, debugWaitCmd, debugModeCmd)
+	rootCmd.AddCommand(debugStartCmd, debugExecCmd, debugStatusCmd, debugQuitCmd, debugWslogsCmd, debugSQLCmd, debugWsdebugCmd, debugWhyCmd, debugWaitCmd, debugModeCmd)
 }

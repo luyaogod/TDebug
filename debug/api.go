@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/coder/websocket"
 
@@ -179,6 +180,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/source-preview", s.hSourcePreview)
 	mux.HandleFunc("POST /api/wstest", s.hWSTest)
 	mux.HandleFunc("GET /api/wslogs", s.hWSLogs)
+	mux.HandleFunc("POST /api/dbsql", s.hDBSQL)
 	mux.HandleFunc("GET /api/wslogs/content", s.hWSLogContent)
 	mux.HandleFunc("POST /api/wslogs/debug", s.hWSLogDebug)
 	mux.HandleFunc("GET /api/settings", s.hSettingsGet)
@@ -513,6 +515,9 @@ func (s *Server) hSnapshot(w http.ResponseWriter, r *http.Request) {
 		"topent":          sess.TopentOverride(),
 		"topentCfg":       sess.TopentCfg(),
 		"topentShell":     sess.TopentShell(),
+		// 本次重放跑完后读回来的响应原文(非重放会话为空)。
+		// 以前想看它只能"停在收尾断点再 continue 到 exit"从 stdout 抓,很绕。
+		"replayResponse": sess.ReplayResponse(),
 		// 运行态:静默多久 / 已跑多久。配合 why 判断"是在等用户还是在空转"。
 		"silentSeconds": sess.SilentSeconds(),
 		// 谁在驾驶 + 正在执行哪条命令(界面上的"AI 正在执行 continue(已 12s)")
@@ -909,6 +914,39 @@ func (s *Server) hRaw(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 入口态(程序还没 run)的 next/step/until/finish:fgldb 在 run 之前**不受理**这些命令,
+	// 只回一句 "The program is not being run."。以前这里直接把它们当裸命令透传,后果是
+	// 会话被卡死:execOpt 见"放行类命令"就把状态乐观翻成 running 且无回滚,之后
+	// interrupt 因"未启动"被拒、exec 因"运行中"被拒、EndRun 的中断同样失败 ——
+	// 只能整体断开会话重来。真机踩过。
+	//
+	// 会话语义上这几条本来是有办法的:stepFromEntry(tbreak main + run)。
+	// /control 一直走的就是它,只有 /raw 漏了 —— 这里补齐,两条路行为对齐。
+	if !sess.Started() && lower != "run" && lower != "continue" && IsResumeCmd(cmd) {
+		soft := time.Duration(req.Wait) * time.Second
+		if soft < 0 {
+			soft = 0
+		}
+		st, completed, er := sess.StepSoft(cmd, soft)
+		if er != nil {
+			fail(w, 400, er)
+			return
+		}
+		resp := map[string]any{
+			"ok": true, "lines": []string{cmd},
+			"state": string(sess.State()), "started": sess.Started(),
+			"hint": "入口停站没有调用栈,step/next 会先 tbreak main 把程序放起来;" +
+				"用 tdebug wait --for stopped 等它停到 MAIN",
+		}
+		if !completed && st == nil {
+			resp["softTimeout"] = true
+			resp["hint"] = "程序已放行但还没停站;用 tdebug wait --for stopped 等它停下来"
+		} else if st != nil {
+			resp["stop"] = st
+		}
+		writeJSON(w, 200, resp)
+		return
+	}
 	timeout := req.Timeout
 	if timeout <= 0 {
 		timeout = 30
@@ -939,6 +977,22 @@ func (s *Server) hRaw(w http.ResponseWriter, r *http.Request) {
 	}
 	s.emitAction(r, sess, act, cmd)
 	resp := map[string]any{"ok": true, "lines": res.Lines}
+	// 会话层就截断过(行数/单值超上限)要如实说,否则调用方会把残缺内容当成全部
+	if res.Truncated {
+		resp["truncated"] = true
+		resp["truncReason"] = res.TruncReason
+	}
+	// 输出够大就落一份**完整**的本地副本并回报路径。
+	// 理由:正文有上限(超了只给头部),但完整内容必须留得住 —— 否则想多看一点就得重跑命令,
+	// 而重跑会改变现场。落本地后可以随时 grep/整读,零往返。
+	// 阈值是为了别给每条小命令都留一个文件。
+	if n := len(res.Lines); n > execLogMinLines || linesBytes(res.Lines) > execLogMinBytes {
+		env := mirrorEnvSeg(s.cfg.EnvName(), s.cfg.SSH.Host, s.cfg.Zone)
+		if p := writeExecLog(s.cfg.DataDir, env, execLogName(cmd), []byte(strings.Join(res.Lines, "\n"))); p != "" {
+			resp["localPath"] = p
+			resp["totalLines"] = n
+		}
+	}
 	if res.SoftTimeout {
 		// 不是错误:命令仍在飞,程序仍在跑
 		resp["softTimeout"] = true
@@ -1494,6 +1548,95 @@ func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 	// 随回包一起给出去,让 CLI 能当场说清,而不是等人自己去翻事件日志。
 	writeJSON(w, 200, map[string]any{"ok": true, "sessionId": sess.ID,
 		"module": sess.Module, "prog": sess.Prog, "runProg": sess.RunProg, "warn": replayWarn})
+}
+
+// hDBSQL 只读 SQL:POST /api/dbsql {sql, ent, timeout}
+//
+// **不过模式闸门** —— 与 /api/wslogs 同理:模式闸门管的是"谁能写调试会话",
+// 而这条不碰会话、不移动程序位置,只是读库。人与 AI 都放行。
+// 它有自己的配置闸门(db.readonlySql,默认开),那才是这个能力的开关。
+//
+// 归因用 Type=log(不是 ai_action —— 那个的语义是"AI 做了写操作",只读不该占用它),
+// 且记在**执行成功之后**,与 emitAction 的时机一致。
+func (s *Server) hDBSQL(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SQL     string `json:"sql"`
+		Ent     int    `json:"ent"`     // 0 = 用当前会话的 TOPENT,否则配置默认
+		Timeout int    `json:"timeout"` // 秒
+	}
+	if !readBody(w, r, &req) {
+		return
+	}
+	// 企业编号:优先当前会话的 override(tdebug topent 设的那个),再退到配置默认。
+	// 不做成"必须挂会话"是为了让它独立可用;但只要会话在,就一定跟会话走 ——
+	// 否则会出现"调试的是这个企业、查库查的是另一个"这种最难查的错。
+	ent := req.Ent
+	if ent <= 0 {
+		if cur := s.mgr.Current(); cur != nil {
+			ent = cur.TopentIntForDB()
+		}
+	}
+	conn, err := host.Dial(s.cfg.SSH)
+	if err != nil {
+		fail(w, 500, fmt.Errorf("SSH 连接失败: %w", err))
+		return
+	}
+	defer conn.Close()
+	res, err := s.mgr.RunReadonlyQuery(conn, ReadonlyQueryReq{SQL: req.SQL, Ent: ent, Timeout: req.Timeout})
+	if err != nil {
+		fail(w, 400, err)
+		return
+	}
+	if actorOf(r) == "ai" {
+		text := "只读 SQL(企业 " + fmt.Sprint(res.Ent) + " → " + res.Account + "): " + firstLine(req.SQL, 120)
+		s.mgr.emit(Event{Type: "log", Actor: "ai", Action: "sql", Text: text})
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "result": res})
+}
+
+// firstLine 取首行并截断(时间线与日志里只留个线索,不留全文)
+func firstLine(s string, max int) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+// 命令输出落本地的阈值:太小会给每条命令都留一个文件,没必要
+const (
+	execLogMinLines = 200
+	execLogMinBytes = 16 << 10
+)
+
+func linesBytes(ls []string) int {
+	n := 0
+	for _, s := range ls {
+		n += len(s) + 1
+	}
+	return n
+}
+
+// execLogName 落盘文件名:时间戳 + 命令摘要,便于人肉对照这是哪个命令的输出。
+// 摘要按 rune 走、用字节数封顶,别把中文劈成半个。
+func execLogName(cmd string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(cmd) {
+		switch {
+		case r == ' ' || r == '\t':
+			b.WriteRune('_')
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+		if b.Len() >= 60 {
+			break
+		}
+	}
+	return time.Now().Format("20060102-150405.000") + "-" + pathSafeSeg(b.String()) + ".txt"
 }
 
 // ---------- 设置(多 SSH / 多数据库) ----------

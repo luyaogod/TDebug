@@ -176,15 +176,26 @@ func (d *dbRun) kbTarget() (host, port, db string, err error) {
 
 // exec 执行查询:金仓走 ksql(kbSQL),Oracle 走 sqlplus(oracleSQL)。
 // connStr 由 dbConnStr(账号)生成,须与方言匹配;ds 系统账号为 gzou_t/gzzz_t 解析入口。
+//
+// SQL 一律经 **stdin** 送(见 host.OutputStdin):不拼进命令行,服务器的 shell 就不会
+// 再解析一遍 SQL 文本。命令串里只剩工具路径、账号与连接参数,都过了白名单。
 func (d *dbRun) exec(conn *host.SSHConn, connStr, oracleSQL, kbSQL string, timeout time.Duration) (string, error) {
 	if d.conn.Type == "kingbase" {
 		h, p, db, err := d.kbTarget()
 		if err != nil {
 			return "", err
 		}
-		return conn.Output(host.KbCmd(d.ksql, h, p, db, connStr, kbSQL), timeout)
+		cmd, err := host.KbCmd(d.ksql, h, p, db, connStr)
+		if err != nil {
+			return "", err
+		}
+		return conn.OutputStdin(cmd, []byte(kbSQL), timeout)
 	}
-	return conn.Output(host.SqlplusRun(d.zone, d.oraT, connStr, oracleSQL), timeout)
+	cmd, err := host.SqlplusCmd(d.zone, d.oraT, connStr, 0)
+	if err != nil {
+		return "", err
+	}
+	return conn.OutputStdin(cmd, []byte(oracleSQL), timeout)
 }
 
 // dbAllMappings 查询 gzou_t 全部企业→账号映射(用 ds 系统账号)
