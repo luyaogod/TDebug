@@ -3,7 +3,7 @@
 // 此时列表收起为「状态 + 服务」两列给面板让位 —— 详情面板可拖拽分配宽度,也可主动关闭(✕ / Esc)。
 // 查询条件对齐 awsq990 主查询 QBE:服务名(wsfa001)+ 开始时间范围(wsfa003);仅失败为本工具扩展
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Bug, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, ChevronUp, Copy, RefreshCw, Undo2, X } from 'lucide-react'
+import { Bug, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, ChevronUp, Copy, Fingerprint, RefreshCw, Undo2, X } from 'lucide-react'
 import { useStore } from './store'
 import { Checkbox, DatePicker, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui'
 import type { WSLogItem } from './api'
@@ -134,7 +134,7 @@ export function WsLogView() {
   // 日期/仅失败仍即时生效(沿用原有交互)。
   // 条件语义对齐 T100 原生页 awsq990:服务名称 wsfa001(支持 * ? 通配)、
   // 处理结果 wsfa006、发起端 wsfa013、服务端 wsfa018(后三者等值)。
-  const [draft, setDraft] = useState({ service: '', result: '', origin: '', server: '' })
+  const [draft, setDraft] = useState({ service: '', job: '', result: '', origin: '', server: '' })
   const [applied, setApplied] = useState(draft)
   const [onlyFail, setOnlyFail] = useState(false)
   // 日期变化时要复用"最新已提交条件",用 ref 读避免把它写进 effect 依赖
@@ -266,6 +266,23 @@ export function WsLogView() {
     window.setTimeout(() => setCopyState(null), 1500)
   }
 
+  // ---- 唯一标识复制 ----
+  // 人看到可疑的一行 → 点一下把它的唯一标识(rowid / ctid)复制走 → 粘到对话里
+  // → AI 用 tdebug wsdebug <标识> 直接重放这一行。复制内容**就是标识本身**,
+  // 不带任何包装文案,免得 AI 还要从周围文字里把它抠出来。
+  const [idState, setIdState] = useState<'ok' | 'fail' | null>(null)
+  useEffect(() => { setIdState(null) }, [sel?.rowid])
+  const copyRowID = async () => {
+    if (!sel?.rowid) return
+    try {
+      await navigator.clipboard.writeText(sel.rowid)
+      setIdState('ok')
+    } catch {
+      setIdState('fail')
+    }
+    window.setTimeout(() => setIdState(null), 1500)
+  }
+
   // 悬停预取:在行上停留 ~120ms 就开始取该行报文,点下去时通常已就绪(划过不停留则不触发)。
   // 只对当前页可见的列做,鼠标快速扫过不会发请求。
   const prefetchTimer = useRef<number | undefined>(undefined)
@@ -310,6 +327,14 @@ export function WsLogView() {
             placeholder="服务名称(支持 * ? 通配,回车生效)"
             title="服务名称 wsfa001:支持 * ? 通配,如 icd.erp.wo*;回车生效"
             className={QUERY_INPUT}
+          />
+          <input
+            value={draft.job}
+            onChange={(e) => setDraft((d) => ({ ...d, job: e.target.value }))}
+            onKeyDown={onEnter}
+            placeholder="作业编号(支持 * ? 通配)"
+            title="作业编号 wsfa012:支持 * ? 通配,如 wssp01131 / wssp*。服务名是 oa.schema.data.get 这类反域名,认不出是哪个作业,按作业找要用这个;回车生效"
+            className={QUERY_INPUT_SM}
           />
           <input
             value={draft.server}
@@ -481,6 +506,19 @@ export function WsLogView() {
                 >
                   <Bug className="h-3.5 w-3.5" />
                   {reqDirty ? '用修改后的入参重放' : '调试此调用'}
+                </button>
+                {/* 把这行日志的唯一标识交给 AI:AI 用 tdebug wsdebug <标识> 直接重放这一行 */}
+                <button
+                  onClick={() => void copyRowID()}
+                  title="复制这行日志的唯一标识(rowid / ctid)。把它发给 AI,AI 就能用 tdebug wsdebug <标识> 直接重放这一行"
+                  className={`inline-flex shrink-0 items-center gap-1 border px-2 py-0.5 text-xs transition-colors ${
+                    idState === 'fail'
+                      ? 'border-red-500/20 text-red-600 dark:text-red-400'
+                      : 'border-border text-muted-foreground hover:bg-accent hover:text-foreground'
+                  }`}
+                >
+                  {idState === 'ok' ? <Check className="h-3.5 w-3.5" /> : <Fingerprint className="h-3.5 w-3.5" />}
+                  {idState === 'ok' ? '已复制' : idState === 'fail' ? '复制失败' : '复制标识'}
                 </button>
                 {/* 报文页(Request / Response)的复制按钮:放在最右,即详情面板右上角 */}
                 {tab !== 'info' && (

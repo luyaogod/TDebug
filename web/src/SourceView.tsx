@@ -57,10 +57,12 @@ export function SourceView() {
     setEditorReady(true)
     // 变量悬浮取值卡片(仅 debug model、仅停站时取值)
     attachHover(editor)
-    // 点击行号/边栏切换断点
+    // 点击行号/边栏切换断点(协作模式下断点归 AI —— 界面收敛成观察台,
+    // 服务端同样会 403,这里不响应点击只是不让界面装作能做)
     editor.onMouseDown((e) => {
       const t = e.target.type
       if (t !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && t !== monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS) return
+      if (useStore.getState().mode === 'collab') return
       const line = e.target.position?.lineNumber
       if (line) useStore.getState().toggleBreakpoint(line)
     })

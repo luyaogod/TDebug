@@ -59,6 +59,11 @@ type StopInfo struct {
 	Line   int          `json:"line,omitempty"`
 	Frames []Frame      `json:"frames,omitempty"`
 	Source []SourceLine `json:"source,omitempty"`
+	// WaitingForUser:当前停站行本身是交互语句(INPUT/MENU/DISPLAY ARRAY…),
+	// 即程序此刻把控制权交给了前端界面。由停站源码块的当前行文本判定,零副作用。
+	// 注意它描述的是「停在这条语句上」,不是「正在语句里等操作」——后者要看 Why()。
+	WaitingForUser bool   `json:"waitingForUser,omitempty"`
+	WaitingKind    string `json:"waitingKind,omitempty"` // input|input_by_name|input_array|display_array|menu|prompt|construct|window
 }
 
 // Breakpoint 断点
@@ -92,6 +97,15 @@ type Event struct {
 	Stop      *StopInfo `json:"stop,omitempty"`
 	Vars      []VarItem `json:"vars,omitempty"`
 	Text      string    `json:"text,omitempty"`
+	// Seq 单调递增序号,由 Manager.emit 分配(进程级,重启归零;配 Manager.Epoch 识别)。
+	// 用途是**游标语义**:WS 开场补发后靠它去重、前端靠它判重。
+	// 注意 hWait 不依赖它 —— 那里是栅栏语义,谓词只看权威现状。
+	Seq uint64 `json:"seq,omitempty"`
+	// Actor 谁发起的:ai | human | system(空 = 未声明,按 system 处理)
+	Actor string `json:"actor,omitempty"`
+	// Action 机器可读的动作名(bp.add / control.step / session.restart),供前端按类型分支;
+	// Text 则是给人看的文案
+	Action string `json:"action,omitempty"`
 }
 
 // execResult 命令响应
@@ -106,6 +120,9 @@ type execResult struct {
 	Continuing bool
 	SawShell   bool
 	Err        string // 调试器错误行(No stack / No symbol 等)
+	// SoftTimeout:软等待到点返回(程序仍在跑,命令没有被取消、也没发 SIGINT)。
+	// 区别于 exec 返回的硬超时 error —— 那条路径会发 \x03 探测。
+	SoftTimeout bool `json:"softTimeout,omitempty"`
 }
 
 type pendingCmd struct {
@@ -120,8 +137,16 @@ type pendingCmd struct {
 	errText string
 	res     chan *execResult
 
+	startedAt time.Time // 命令发出时刻(快照用来回答"AI 正在执行什么、跑了多久")
+
 	valueTrunc bool // print 值已截断
 	linesTrunc bool // 行列表已截断
+
+	// softAbandoned 软等待已放弃等待这条命令,但**命令仍在飞**。
+	// 槽位不能在这里清:onStop 收口时要靠它区分「还有人等结果(sync 路径)」与
+	// 「已无人等待(async 路径)」——sync 路径只回填响应、不置 stopped、不发 stopped 事件,
+	// 若被放弃的命令误走 sync,会话会永久卡在 running 且停站事件永久丢失。
+	softAbandoned bool
 }
 
 const (
@@ -197,6 +222,9 @@ type Session struct {
 	startAt  time.Time // 进入 stopped 时刻(看门狗/停留计时)
 	quitting bool
 
+	runningSince time.Time // 进入 running 时刻(回答"跑了多久")
+	lastOutputAt time.Time // 最近一次有协议输出的时刻(回答"静默了多久")
+
 	lastAutovars []VarItem // 最近一次停站的自动变量求值结果
 	autovarsOn   bool      // 停站后自动求值自动变量(前端面板开关,默认关:减少自动调度拖慢命令队列)
 
@@ -206,6 +234,9 @@ type Session struct {
 
 	sftpClientCache *sftp.Client
 	srcCache        map[string]srcCacheEntry
+	// mirrored 已经发起过镜像落盘的 DVM 源名(见 mirrorStopFile):
+	// 同一个文件反复停站不重复拉取。尽力而为的标记 —— 失败的不会重试。
+	mirrored map[string]bool
 
 	stopTimer *time.Timer
 	kaStop    func() // 停止 SSH 心跳(主动关闭连接前调用,避免误报掉线)
@@ -218,6 +249,34 @@ type Session struct {
 	booted         bool   // 是否已完成首次登录(菜单→shell),宿主可复用
 	shellReady     bool   // pty 当前停在 shell 提示符,可直接敲 shell 命令
 	topentOverride string // 会话内手动设置的 TOPENT(空 = 未设置,按配置默认)
+
+	// mode 谁在驾驶:ModeSolo(纯人工,默认) | ModeCollab(协作,AI 主导)。
+	// 由发起方决定,之后靠界面上的接管/交给 AI 按钮切换 —— 不做逐命令协商。
+	mode string
+}
+
+const (
+	// ModeSolo 纯人工:只有人能写,AI 只能读。默认模式,界面与旧行为完全一致。
+	ModeSolo = "solo"
+	// ModeCollab 协作:AI 主导,人只能读 + 请求 AI 代为操作。
+	ModeCollab = "collab"
+)
+
+// Mode 当前模式(空值视为 solo)
+func (s *Session) Mode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mode == "" {
+		return ModeSolo
+	}
+	return s.mode
+}
+
+// SetMode 设置模式
+func (s *Session) SetMode(m string) {
+	s.mu.Lock()
+	s.mode = m
+	s.mu.Unlock()
 }
 
 // NewSession 建立 SSH 连接并打开 PTY(登录与启动由 Launch 驱动)。
@@ -967,6 +1026,130 @@ func (s *Session) Interrupt() error {
 // ForceExit 供 API 层终结失败会话(置 exit 态并释放资源)
 func (s *Session) ForceExit() { s.forceExit() }
 
+// WhyResult 「程序此刻到底在干什么」的探测结论
+type WhyResult struct {
+	WaitingForUser bool   `json:"waitingForUser"`
+	Kind           string `json:"kind,omitempty"`   // 交互语句类别(仅 WaitingForUser 时非空)
+	Evidence       string `json:"evidence"`         // 判断依据(人话,可直接转述给用户)
+	Reason         string `json:"reason,omitempty"` // 停站原因
+	Func           string `json:"func,omitempty"`
+	File           string `json:"file,omitempty"`
+	Line           int    `json:"line,omitempty"`
+	SourceText     string `json:"sourceText,omitempty"` // 停站那一行的原文
+	Resumed        bool   `json:"resumed"`              // 探测后是否已放回运行
+	Risk           string `json:"risk,omitempty"`       // 未放回时的提醒
+}
+
+// Why 探测程序此刻是在等用户操作、还是在空转 —— 把 SKILL.md 里教 AI 人肉做的
+// 三步(interrupt → where → 看停在哪一行)搬进服务端,一次调用给出结论。
+//
+// 三个要点:
+//  1. 已经停在停站态就直接分类,**不发任何命令**(零副作用),不会打扰正在等用户的程序。
+//  2. 只有运行中才发 SIGINT。语义随前端模式而变:TUI 的 singular dialog 会被
+//     **取消**(int_flag 置位、离开该语句);GUI/GDC 不会取消当前对话框。
+//     另外没有 DEFER INTERRUPT 时 SIGINT 默认直接终止进程 —— 现在只挂起,
+//     是因为 fglrun -d 的调试器拦截了它,这个安全边界是调试器给的,不是协议保证的。
+//  3. 默认探测完自动放回运行:探测本身会暂停程序,而 GDC 上用户的对话框还等着,
+//     挂着不动用户就没法操作。要保留现场传 resume=false。
+func (s *Session) Why(resume bool) (*WhyResult, error) {
+	s.mu.Lock()
+	st, started := s.state, s.started
+	s.mu.Unlock()
+	if !started {
+		return nil, fmt.Errorf("程序尚未启动:先 start 或 run 再探测")
+	}
+	if st != StateStopped && st != StateRunning {
+		return nil, fmt.Errorf("当前状态 %s 不可探测", st)
+	}
+
+	// 只有"是我们把它中断下来的"才需要我们负责放回。本来就停在断点上的程序
+	// 绝不能因为一次探测被放跑 —— 那会直接冲过调用方精心设的断点。
+	interrupted := false
+	if st == StateRunning {
+		if err := s.Interrupt(); err != nil {
+			return nil, err
+		}
+		if _, err := s.WaitForStop(15 * time.Second); err != nil {
+			return nil, fmt.Errorf("中断后 15s 内没拿回控制权(程序可能没响应 SIGINT):%w", err)
+		}
+		interrupted = true
+	}
+
+	stop := s.Cur()
+	// interrupt 停站常常没有位置头(File 为空,行号只能从 `->` 行补):补一次 where
+	// 拿 Frame[0] 的 File:Line。这正是 SKILL.md 让 AI 手工敲 where 的那一步。
+	if stop.File == "" || stop.Line == 0 {
+		if frames, err := s.Where(); err == nil && len(frames) > 0 {
+			f := frames[0]
+			if stop.File == "" {
+				stop.File = f.File
+			}
+			if stop.Line == 0 {
+				stop.Line = f.Line
+			}
+			if stop.Func == "" {
+				stop.Func = f.Func
+			}
+		}
+	}
+
+	text := CurSourceText(stop.Source)
+	if text == "" {
+		text = s.sourceLineAt(stop.File, stop.Line)
+	}
+	kind := ClassifyInteractiveLine(text)
+
+	res := &WhyResult{
+		WaitingForUser: kind != "",
+		Kind:           kind,
+		Reason:         stop.Reason,
+		Func:           stop.Func,
+		File:           stop.File,
+		Line:           stop.Line,
+		SourceText:     strings.TrimSpace(text),
+	}
+	switch {
+	case kind != "":
+		res.Evidence = fmt.Sprintf("停在交互语句 %s 上:程序已把控制权交给界面,在等用户操作", kind)
+	case strings.TrimSpace(text) == "":
+		res.Evidence = "拿不到停站那一行的源码,无法判断(不下结论)"
+	case stop.Reason == "interrupt":
+		res.Evidence = "停在普通语句上,不是在等用户 —— 多半是慢查询/慢循环或长流程"
+	default:
+		res.Evidence = "停在普通语句上(断点命中),不是在等用户"
+	}
+
+	// 只对"是我们把它中断下来的"负责放回
+	if interrupted && resume && s.State() == StateStopped {
+		if _, err := s.Continue(); err != nil {
+			res.Evidence += fmt.Sprintf("(自动放回失败,程序仍停在调试器上: %v)", err)
+		}
+	}
+	res.Resumed = s.State() == StateRunning
+	if interrupted && !res.Resumed {
+		res.Risk = "程序已停在调试器上:TUI 前端的对话框可能已被取消;GDC 上用户在程序挂起期间也无法继续操作。" +
+			"处理完请 continue 放回,或下次直接 why(默认自动放回)"
+	}
+	return res, nil
+}
+
+// sourceLineAt 读远端源码第 line 行(1-based)的原文;取不到返回空串。
+// 走 ResolveSource,命中 mtime 校验的 srcCache —— 反复停站不会反复拉 SFTP。
+func (s *Session) sourceLineAt(dvmFile string, line int) string {
+	if dvmFile == "" || line <= 0 {
+		return ""
+	}
+	sf, err := s.ResolveSource(dvmFile, s.Module)
+	if err != nil || sf == nil {
+		return ""
+	}
+	lines := strings.Split(sf.Content, "\n")
+	if line > len(lines) {
+		return ""
+	}
+	return lines[line-1]
+}
+
 // forceExit 强制进入退出态并释放资源
 func (s *Session) forceExit() {
 	s.mu.Lock()
@@ -995,9 +1178,23 @@ func (s *Session) forceExit() {
 
 // ---------- 命令执行 ----------
 
+// execOpts 命令执行的可选语义。零值 = 原有行为。
+type execOpts struct {
+	// SoftWait > 0 时启用「软等待」:到点后若程序仍在跑,直接返回带 SoftTimeout 的
+	// 结果,**不发 SIGINT、不取消命令**。区别于 timeout 的硬语义(超时发 \x03 探测)。
+	// 只给 resume 类命令(continue/run/step/finish/until)用:print 之类的请求/响应
+	// 命令永远走硬路径,这样 autovars 后台求值不受影响。
+	SoftWait time.Duration
+}
+
 // exec 在 STOPPED 态发送一条命令并等待响应。
 // 若上一条命令仍在执行(如 autovars 后台求值),最多宽限 1.5s 再报忙。
 func (s *Session) exec(kind, cmd string, mode int, timeout time.Duration) (*execResult, error) {
+	return s.execOpt(kind, cmd, mode, timeout, execOpts{})
+}
+
+// execOpt 带可选语义的 exec(见 execOpts)。21 个既有调用点走 exec,语义不变。
+func (s *Session) execOpt(kind, cmd string, mode int, timeout time.Duration, o execOpts) (*execResult, error) {
 	busyDeadline := time.Now().Add(1500 * time.Millisecond)
 	var p *pendingCmd
 	for {
@@ -1011,7 +1208,7 @@ func (s *Session) exec(kind, cmd string, mode int, timeout time.Duration) (*exec
 			return nil, fmt.Errorf("当前状态 %s 不可发送命令", st)
 		}
 		if s.pending == nil {
-			p = &pendingCmd{cmd: cmd, kind: kind, mode: mode, res: make(chan *execResult, 1)}
+			p = &pendingCmd{cmd: cmd, kind: kind, mode: mode, res: make(chan *execResult, 1), startedAt: time.Now()}
 			s.pending = p
 			s.mu.Unlock()
 			break
@@ -1028,16 +1225,126 @@ func (s *Session) exec(kind, cmd string, mode int, timeout time.Duration) (*exec
 		return nil, fmt.Errorf("写入终端失败: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	// 放行类命令一发出,程序就不在调试器上了 —— 状态必须如实翻 running。
+	// 不能只靠输出判定:fgldb 只有 continue 会打 "Continuing.",step/next 不打。
+	// 假装还停在 stopped 的后果很实际:界面上显示"已停站 · 停留 Ns"、interrupt
+	// 被自己的 state==Running 检查拒掉 —— 程序卡在对话框里时连中断都发不出去。
+	if IsResumeCmd(cmd) {
+		s.setState(StateRunning)
+	}
+
+	hardCtx, hardCancel := context.WithTimeout(context.Background(), timeout)
+	defer hardCancel()
+
+	if o.SoftWait <= 0 {
+		select {
+		case r := <-p.res:
+			return r, nil
+		case <-hardCtx.Done():
+			s.clearPending()
+			s.recoverAfterTimeout(cmd)
+			return nil, fmt.Errorf("命令超时(%s): %s", timeout, cmd)
+		}
+	}
+
+	soft := time.NewTimer(o.SoftWait)
+	defer soft.Stop()
 	select {
 	case r := <-p.res:
 		return r, nil
-	case <-ctx.Done():
+	case <-soft.C:
+		// 放弃等待(不是取消命令):标记后 onStop 会把这条停站走异步分支,
+		// 程序照常运行,后续停站与事件都不丢。不发 \x03。
+		if !s.abandonPending(p) {
+			// 竞态:标记前命令刚被完成/清理,退回等它的结果(或硬超时)
+			select {
+			case r := <-p.res:
+				return r, nil
+			case <-hardCtx.Done():
+				s.clearPending()
+				s.recoverAfterTimeout(cmd)
+				return nil, fmt.Errorf("命令超时(%s): %s", timeout, cmd)
+			}
+		}
+		return &execResult{Cmd: cmd, SoftTimeout: true}, nil
+	case <-hardCtx.Done():
 		s.clearPending()
 		s.recoverAfterTimeout(cmd)
 		return nil, fmt.Errorf("命令超时(%s): %s", timeout, cmd)
 	}
+}
+
+// abandonPending 标记「已放弃等待这条命令」,并如实把状态翻成 running。
+// 槽位**不在这里清**:命令仍在飞,onStop 收口时要靠 softAbandoned 区分 sync/async 路径。
+func (s *Session) abandonPending(p *pendingCmd) bool {
+	s.mu.Lock()
+	if s.pending != p {
+		s.mu.Unlock()
+		return false
+	}
+	p.softAbandoned = true
+	changed := false
+	if s.state == StateStopped {
+		// 必须如实翻 running:否则下一条 exec 会在 state==Stopped 的假象下
+		// 把命令写进正在运行程序的输入缓冲,在下一个提示符处被消费 = 延迟命令注入。
+		s.state = StateRunning
+		s.runningSince = time.Now()
+		changed = true
+	}
+	s.mu.Unlock()
+	if changed {
+		s.stopWatchdog() // 与 setState(StateRunning) 一致:离开停站态取消看门狗
+		s.emitEvent(Event{Type: "state", State: string(StateRunning)})
+	}
+	return true
+}
+
+// RunningSince 进入 running 的时刻(零值 = 当前不在运行)
+func (s *Session) RunningSince() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != StateRunning {
+		return time.Time{}
+	}
+	return s.runningSince
+}
+
+// InflightInfo 当前正在执行的那条命令 —— 对外回答"AI 此刻在干什么、跑了多久"。
+// 在此之前它只藏在私有的 pending 槽位里,界面完全看不见。
+type InflightInfo struct {
+	Cmd     string    `json:"cmd"`
+	Since   time.Time `json:"since"`
+	Elapsed float64   `json:"elapsed"` // 秒
+}
+
+// Inflight 取在飞的命令;空闲返回 nil。
+func (s *Session) Inflight() *InflightInfo {
+	s.mu.Lock()
+	p := s.pending
+	s.mu.Unlock()
+	if p == nil || p.startedAt.IsZero() {
+		return nil
+	}
+	return &InflightInfo{Cmd: p.cmd, Since: p.startedAt, Elapsed: time.Since(p.startedAt).Seconds()}
+}
+
+// SilentSeconds 距最近一次协议输出的秒数(用来判断"跑了很久但一点动静都没有")。
+// 从未有过输出时退回到 runningSince;都不在运行态返回 0。
+func (s *Session) SilentSeconds() float64 {
+	s.mu.Lock()
+	st, last, since := s.state, s.lastOutputAt, s.runningSince
+	s.mu.Unlock()
+	if st != StateRunning {
+		return 0
+	}
+	base := last
+	if base.IsZero() || (!since.IsZero() && base.Before(since)) {
+		base = since
+	}
+	if base.IsZero() {
+		return 0
+	}
+	return time.Since(base).Seconds()
 }
 
 // recoverAfterTimeout 命令超时后探测真实状态:发 SIGINT,
@@ -1124,6 +1431,13 @@ func (s *Session) Started() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.started
+}
+
+// Bare 空宿主会话:登录上了,但还没挂任何程序(module/prog 都为空)。
+// 它没有"一轮运行"可保护 —— 前端一连上来就会建出这么一个,而它是 human 身份建的
+// (→ 纯人工),若把它也算进模式闸门,AI 就再也启动不了任何调试。
+func (s *Session) Bare() bool {
+	return s.Prog == "" && s.Module == ""
 }
 
 // Break 下断点(位置: 行号 / 函数名 / file:line)。
@@ -1473,8 +1787,28 @@ func (s *Session) Autovars() []VarItem {
 	return s.lastAutovars
 }
 
+// errSoftWait 内部哨兵:软等待到点、程序仍在运行(不是错误,命令没被取消)。
+// 用哨兵让 Step 主体的既有 `return nil, err` 原样传播,不必逐个改返回点。
+var errSoftWait = errors.New("软等待到点:程序仍在运行")
+
 // Step 步过/步入/步出/直到
 func (s *Session) Step(cmd string) (*StopInfo, error) {
+	stop, _, err := s.StepSoft(cmd, 0)
+	return stop, err
+}
+
+// StepSoft 同 Step,softWait > 0 时启用软等待。
+// 返回 soft=true 表示到点返回、程序仍在运行(未发 SIGINT)。步进可能撞上交互语句
+// 而长时间等用户,所以步进同样需要软等待这条退路。
+func (s *Session) StepSoft(cmd string, softWait time.Duration) (*StopInfo, bool, error) {
+	stop, err := s.stepWith(cmd, softWait)
+	if errors.Is(err, errSoftWait) {
+		return nil, true, nil
+	}
+	return stop, false, err
+}
+
+func (s *Session) stepWith(cmd string, softWait time.Duration) (*StopInfo, error) {
 	if !s.Started() {
 		// 入口停站:fgldb 在 run 之前不支持步进,透明等效为
 		// 「tbreak main + run」= 启动并停在 MAIN 首条语句,符合常规调试器的直觉
@@ -1483,9 +1817,12 @@ func (s *Session) Step(cmd string) (*StopInfo, error) {
 	if cmd != "next" && cmd != "step" && cmd != "finish" && cmd != "until" && !strings.HasPrefix(cmd, "until ") {
 		return nil, fmt.Errorf("不支持的步进命令: %s", cmd)
 	}
-	r, err := s.exec("step", cmd, waitPrompt, 60*time.Second)
+	r, err := s.execOpt("step", cmd, waitPrompt, 60*time.Second, execOpts{SoftWait: softWait})
 	if err != nil {
 		return nil, err
+	}
+	if r.SoftTimeout {
+		return nil, errSoftWait
 	}
 	if r.Err != "" {
 		return nil, fmt.Errorf("%s", r.Err)
@@ -1571,11 +1908,9 @@ func (s *Session) stepFromEntry() (*StopInfo, error) {
 		return nil, err
 	}
 	var stop *StopInfo
-	syncDone := false
 	if r.Stop != nil {
-		// run 在静默判定前就命中了临时断点(同步完成路径,事件未发)
+		// run 在静默判定前就命中了临时断点:同步完成路径,停站事件已由 onStop 发出
 		stop = r.Stop
-		syncDone = true
 	} else {
 		stop, err = s.WaitForStop(60 * time.Second)
 		if err != nil {
@@ -1583,20 +1918,25 @@ func (s *Session) stepFromEntry() (*StopInfo, error) {
 		}
 	}
 	s.emitEvent(Event{Type: "log", Text: "入口步进:已停在 MAIN 首条语句,后续步进为真实单步"})
-	if syncDone {
-		s.emitEvent(Event{Type: "stopped", Stop: stop})
-	}
 	s.startWatchdog()
 	return stop, nil
 }
 
 // Raw 透传任意调试命令(供 AI 高级用法),返回原始行
 func (s *Session) Raw(cmd string, timeout time.Duration) ([]string, error) {
-	r, err := s.exec("other", cmd, waitPrompt, timeout)
+	r, err := s.RawSoft(cmd, timeout, 0)
 	if err != nil {
 		return nil, err
 	}
 	return r.Lines, nil
+}
+
+// RawSoft 同 Raw,softWait > 0 时启用软等待:到点若程序仍在跑就返回
+// (execResult.SoftTimeout 为真),**不发 SIGINT、不取消命令**。
+// 这是 AI 侧 `exec "continue" --wait N` 的落点 —— 替代原先"超时就偷偷发 \x03"
+// 的推荐用法(那个副作用会打断 GDC 上用户的输入)。
+func (s *Session) RawSoft(cmd string, timeout, softWait time.Duration) (*execResult, error) {
+	return s.execOpt("other", cmd, waitPrompt, timeout, execOpts{SoftWait: softWait})
 }
 
 // ---------- 输出泵 ----------
@@ -1661,6 +2001,7 @@ func (s *Session) onLine(ln string) {
 	collect := s.collect
 	state := s.state
 	quitReq := s.quitReq
+	s.lastOutputAt = time.Now()
 	s.mu.Unlock()
 
 	// ---- 停站块开启 ----
@@ -1681,9 +2022,20 @@ func (s *Session) onLine(ln string) {
 				num, _ := strconv.Atoi(m[1])
 				line, _ := strconv.Atoi(m[4])
 				collect = &stopCollect{reason: "breakpoint", bpnum: num, fn: m[2], file: m[3], line: line}
+			} else if m := reSource.FindStringSubmatch(ln); m != nil && m[1] != "" &&
+				pending != nil && IsResumeCmd(pending.cmd) {
+				// 带箭头的源码行 = 当前停站行。放行类命令(step/next/continue…)停下时,
+				// fgldb 可能**只打源码窗、不打任何位置头** —— 以前这个分支什么都不做,
+				// 于是 collect 从不创建、onStop 从不被调用:停站事件不发、s.cur 不更新,
+				// 界面上的代码画面也就完全不会跟随 AI 的步进。必须把这种也当成一次停站。
+				//
+				// 两个限定条件都必要:只认**带箭头**的行(list 之类输出没有箭头),
+				// 且只认**放行类命令在飞**时(排除别的命令恰好带回一行源码)。
+				collect = &stopCollect{reason: "step"}
 			} else if reSource.MatchString(ln) {
-				// 源码块行(如 `-> 1532 DEFER INTERRUPT`):行内容含关键字,
-				// 不是人工中断标记,不能开启中断收集
+				// 其余源码块行(如 `-> 1532 DEFER INTERRUPT`):行内容可能含 INTERRUPT
+				// 这类关键字,必须在这里吃掉 —— 否则会落到下面被误判成人工中断标记。
+				// 这是原有行为,别删。
 			} else if reInterrupt.MatchString(ln) {
 				collect = &stopCollect{reason: "interrupt"}
 			} else if state == StateRunning && !reFrame.MatchString(ln) {
@@ -1703,8 +2055,9 @@ func (s *Session) onLine(ln string) {
 	// ---- 停站块收口:裸提示符 ----
 	if collect != nil {
 		if host.IsBarePrompt(ln) {
-			// 中断块没有位置头:从箭头行补行号(文件名协议未给,由 where/前端兜底)
-			if collect.reason == "interrupt" && collect.file == "" && collect.line == 0 {
+			// 没有位置头的停站(中断块、以及 step/next 只打源码窗的那一种):
+			// 从箭头行补行号(文件名协议未给,由 where/前端兜底)
+			if collect.file == "" && collect.line == 0 {
 				for _, sl := range collect.source {
 					if sl.IsCur {
 						collect.line = sl.Num
@@ -1712,10 +2065,23 @@ func (s *Session) onLine(ln string) {
 					}
 				}
 			}
+			// 无位置头的 step/next 只打源码窗,协议不给文件名。这种情况必然是**同文件**
+			// 移动(跨文件步进 fgldb 会打位置头),所以沿用停站前的位置 —— 与 stepWith
+			// 的兜底一致。不补的话:前端要额外发一次 where,停站文件的本地副本也拿不到文件名。
+			// 中断块同属"无位置头",但中断可能停在另一个文件上,不能瞎猜,仍交给 where。
+			if collect.file == "" && collect.line > 0 && collect.reason == "step" {
+				collect.file = s.Cur().File
+			}
 			stop := &StopInfo{
 				Reason: collect.reason, BPNum: collect.bpnum,
 				Func: collect.fn, File: collect.file, Line: collect.line,
 				Frames: collect.frames, Source: collect.source,
+			}
+			// 就地判定「当前停站行是不是交互语句」:停站源码块本来就带着当前行原文,
+			// 不需要读远端源码、不需要发任何命令 —— 零副作用。
+			if kind := ClassifyInteractiveLine(CurSourceText(collect.source)); kind != "" {
+				stop.WaitingForUser = true
+				stop.WaitingKind = kind
 			}
 			s.mu.Lock()
 			s.collect = nil
@@ -1740,6 +2106,16 @@ func (s *Session) onLine(ln string) {
 	// ---- pending 响应处理(非停站块) ----
 	if pending != nil {
 		pending.addLine(ln)
+
+		// "Continuing." = 程序已放行。这与哪条命令通道无关,状态必须如实翻 running ——
+		// 原先只有 waitMarker(Continue())路径翻,于是 Raw(waitPrompt)发出的
+		// `exec "continue"` 之后 state 仍是 stopped:Interrupt() 会被自己的
+		// state==Running 检查拒掉,SKILL.md 推荐的「拿不准就 interrupt 探测」直接失效。
+		// 这里只修状态、不 complete、不 return,各 mode 的完成判定继续走各自分支
+		// (waitQuiet 的 run 仍要在 1908 附近按首个输出收口)。
+		if reContinuing.MatchString(ln) {
+			s.setState(StateRunning)
+		}
 
 		// 程序退出(作业窗口被关闭或正常结束):立即结束本轮命令,回空闲保留宿主,
 		// 避免 waitMarker/waitPrompt 等不到完成信号而超时,也避免被裸提示符误判成停站
@@ -1855,8 +2231,35 @@ func (s *Session) onLine(ln string) {
 
 // onStop 停站收口:同步(命令响应)或异步(断点/中断命中)
 func (s *Session) onStop(stop *StopInfo, pending *pendingCmd, quitReq bool) {
+	// 停站文件落本地副本(异步、尽力而为)。放这里是因为它是断点命中/中断的必经收口;
+	// 入口停站与同文件步进不走 onStop,由 setStop 那条覆盖。
+	s.mirrorStopFile(stop)
+	// 调用方传来的是 onLine 顶部的快照,可能已被软等待(abandonPending)或硬超时
+	// (clearPending)作废。**必须**以锁内实况复核:sync 分支只回填响应、不置 stopped、
+	// 也不发 stopped 事件(直接 return),一旦让已无人等待的停站误走 sync,
+	// 会话就会永久卡在 running 且停站事件永久丢失。
+	s.mu.Lock()
+	if pending != nil && s.pending != pending {
+		pending = s.pending // 快照已过期:以实况为准
+	}
+	if pending != nil && pending.softAbandoned {
+		s.pending = nil
+		pending = nil
+	}
+	s.mu.Unlock()
+
 	if pending != nil {
-		// 停站发生在命令执行中:完成该命令(step 类),状态保持 stopped
+		// 停站发生在命令执行中(step/continue 类)。先把状态与事件收口,再回填响应 ——
+		// 这样调用方拿到响应时看到的快照已经是新位置。
+		//
+		// 状态在这里必须显式置回 stopped:放行类命令发出时会把状态翻成 running
+		// (见 execOpt),而 sync 分支以前假定"状态本来就是 stopped"。
+		//
+		// stopped 事件同样必须发。AI 发起的 next/continue 走的正是这条路径,
+		// 以前只有异步路径发事件,于是浏览器端收不到任何通知、代码画面不会跟随
+		// (人类自己的步进靠 HTTP 响应里的 stop 落位,所以这个缺口一直没暴露)。
+		s.setState(StateStopped)
+		s.emitEvent(Event{Type: "stopped", Stop: stop})
 		s.completePending(&execResult{
 			Cmd: pending.cmd, Lines: pending.lines, Stop: stop,
 			Frames: pending.frames, Value: pending.value.String(), BPs: pending.bps,
@@ -1887,6 +2290,9 @@ func (s *Session) setState(st State) {
 	if st == StateStopped {
 		s.startAt = time.Now()
 	}
+	if st == StateRunning {
+		s.runningSince = time.Now()
+	}
 	s.mu.Unlock()
 	if st == StateRunning {
 		s.stopWatchdog() // 离开停站态,取消看门狗计时
@@ -1901,6 +2307,48 @@ func (s *Session) setStop(stop *StopInfo) {
 	s.cur = *stop
 	s.curFrame = 0 // 新停站回到栈顶帧
 	s.mu.Unlock()
+	s.mirrorStopFile(stop)
+}
+
+// resetMirrored 清掉"已镜像"记录,必须与 clearMirror 成对调用。
+//
+// 复用的宿主会话(idle 复用免重登录)会把这份记录带进下一轮运行,
+// 而镜像目录在启动时已经清空了 —— 不同步清掉,新一轮就再也不会
+// 落任何副本(mirrorStopFile 以为"这个文件早就镜像过了")。
+func (s *Session) resetMirrored() {
+	s.mu.Lock()
+	s.mirrored = map[string]bool{}
+	s.mu.Unlock()
+}
+
+// mirrorStopFile 把停站文件的源码落进本地镜像。
+//
+// 这是"缓存调试过程中经历过的文件"那一半:只靠 tdebug source 的话,镜像里只有
+// 显式读过的文件;程序停过的文件才是完整的一份经历记录。
+//
+// 异步且尽力而为:绝不能给停站加一次 SFTP 往返(连续 next 时那是逐步的延迟),
+// 失败也只是少一份副本 —— 要看的文件随时可以 tdebug source 显式读。
+func (s *Session) mirrorStopFile(stop *StopInfo) {
+	if stop == nil || stop.File == "" || s.cfg == nil || s.cfg.DataDir == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.mirrored == nil {
+		s.mirrored = map[string]bool{}
+	}
+	seen := s.mirrored[stop.File]
+	s.mirrored[stop.File] = true
+	s.mu.Unlock()
+	if seen {
+		return
+	}
+	dvmFile := stop.File
+	go func() {
+		// ResolveSource 自带 mtime 缓存与镜像落盘
+		if _, err := s.ResolveSource(dvmFile, s.Module); err != nil {
+			log.Printf("[srccache] 停站文件镜像失败 %s: %v", dvmFile, err)
+		}
+	}()
 }
 
 func (s *Session) startWatchdog() {
@@ -2004,6 +2452,15 @@ type SourceFile struct {
 	Path    string    `json:"path"`    // 实际读取的服务器路径
 	Content string    `json:"content"`
 	ModTime time.Time `json:"modTime"`
+	// LocalPath 本地镜像路径(<DataDir>/srccache/…),本次调试读过就有一份;
+	// 让 AI 能在本地整读/搜索,不必每次 SSH 往返。镜像每轮调试开始时清空。
+	LocalPath string `json:"localPath,omitempty"`
+}
+
+// mirrorWrite 会话内读路径的镜像落盘(与会话外 ReadSourceStandalone 共用同一目录)
+func (s *Session) mirrorWrite(serverPath string, data []byte) string {
+	return writeMirror(s.cfg.DataDir,
+		mirrorEnvSeg(s.envName, s.cfg.SSH.Host, s.cfg.Zone), serverPath, data)
 }
 
 type srcCacheEntry struct {
@@ -2080,7 +2537,8 @@ func (s *Session) ResolveSource(dvmFile, module string) (*SourceFile, error) {
 			lastErr = err
 			continue
 		}
-		sf := SourceFile{DVMFile: dvmFile, Path: p, Content: string(data), ModTime: rmt}
+		sf := SourceFile{DVMFile: dvmFile, Path: p, Content: string(data), ModTime: rmt,
+			LocalPath: s.mirrorWrite(p, data)}
 		s.mu.Lock()
 		if len(s.srcCache) > 24 {
 			s.srcCache = map[string]srcCacheEntry{}
@@ -2108,7 +2566,8 @@ func (s *Session) ReadPath(path string) (*SourceFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SourceFile{Path: path, Content: string(data), ModTime: mt}, nil
+	return &SourceFile{Path: path, Content: string(data), ModTime: mt,
+		LocalPath: s.mirrorWrite(path, data)}, nil
 }
 
 // ---------- 快照 ----------

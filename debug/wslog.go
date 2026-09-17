@@ -83,9 +83,11 @@ func sqlWSLogCols(kingbase bool) string {
 //	onlyFail 为本工具扩展
 type WSLogFilter struct {
 	Service   string // 服务名(wsfa001),支持 * ? 通配
+	Job       string // 作业编号(wsfa012),支持 * ? 通配 —— 按"哪个作业"找日志的入口
 	Result    string // 处理结果(wsfa006)等值
 	Origin    string // 发起端(wsfa013)等值
 	Server    string // 服务端(wsfa018)等值
+	PID       string // 服务程序序号(wsfa002)等值 —— 界面「服务程序」列就是它
 	OnlyFail  bool   // 仅失败(wsfa006<>'000')
 	StartFrom string // 起始时间起(wsfa003 >=,字符串字典序即时间序)
 	EndTo     string // 结束时间止(wsfa004 <=;纯日期补到当天 23:59:59.99999)
@@ -117,9 +119,22 @@ func wslogWhere(f WSLogFilter) (string, error) {
 			wc += fmt.Sprintf(" AND UPPER(wsfa001) LIKE '%s'", strings.ReplaceAll(pat, "'", "''"))
 		}
 	}
-	// 三个等值条件:处理结果 / 发起端 / 服务端(原生 `and wsfa006 = '…'` 等)
+	if f.Job != "" {
+		// 作业编号(wsfa012,如 wssp01131):与 service 同款通配。
+		// 这是**按"哪个作业"找日志**的唯一入口 —— 服务名是 oa.schema.data.get 这类反域名,
+		// 光看服务名根本认不出是哪个作业在跑。
+		patOK := regexp.MustCompile(`^[A-Za-z0-9._*?]{1,60}$`)
+		if !patOK.MatchString(f.Job) {
+			wc += " AND 1=0"
+		} else {
+			pat := strings.ReplaceAll(strings.ReplaceAll(strings.ToUpper(f.Job), "*", "%"), "?", "_")
+			wc += fmt.Sprintf(" AND UPPER(wsfa012) LIKE '%s'", strings.ReplaceAll(pat, "'", "''"))
+		}
+	}
+	// 四个等值条件:处理结果 / 发起端 / 服务端 / 服务程序序号(原生 `and wsfa006 = '…'` 等)
+	// wsfa002 是数字列,内联成 '861637' 由数据库隐式转换,与其它等值条件同一个白名单。
 	for _, eq := range []struct{ val, col string }{
-		{f.Result, "wsfa006"}, {f.Origin, "wsfa013"}, {f.Server, "wsfa018"},
+		{f.Result, "wsfa006"}, {f.Origin, "wsfa013"}, {f.Server, "wsfa018"}, {f.PID, "wsfa002"},
 	} {
 		v := strings.TrimSpace(eq.val)
 		if v == "" {

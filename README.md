@@ -77,6 +77,8 @@ cd desktop; npm install; npm run dev
    tdebug start bsft001_wf -m asf      # 连 SSH + 启动作业 + 等入口停站(返回 JSON 快照)
    tdebug exec "break 4450"            # 透传 fgldb 命令
    tdebug exec "print ls_sql"
+   tdebug exec "print g_req_param" "print g_status"   # 一次多条(批量)
+   tdebug exec --file cmds.txt                        # 或从文件读,一行一条
    tdebug exec "continue" --timeout 300
    tdebug stop                         # 可复取的停站现场
    tdebug quit                         # 结束会话(作业窗口随之关闭)
@@ -90,18 +92,20 @@ cd desktop; npm install; npm run dev
 | `desktop` | 桌面模式（Electron 壳拉起）：自建数据目录/配置、允许未配环境、打印 `TDEBUG_READY {json}` |
 | `status` | 查看服务状态与活动会话 |
 | `start <作业>` | 连接 SSH、启动调试并等到入口停站（`--module/-m`、`--zone`、`--ssh`、`--timeout`） |
-| `exec "<fgldb命令>"` | 透传标准调试命令（print/break/next/where/info/watch…），原样返回输出 |
+| `exec "<命令>" [更多…]` | 透传标准调试命令（print/break/next/where/info/watch…），原样返回输出；**可一次给多条**（或 `--file` 从文件读）省掉每条一次进程启动，逐条标注 `[i/N]`；resume 类命令执行后读一次现场，停住了就继续往下跑（「走一步再取一批值」一次调用做完），没停住才中止并把剩余标为未执行；resume 类命令用 `--wait N` 软等待（到点返回，不发 SIGINT），`--timeout` 才是会发 SIGINT 的硬超时 |
 | `quit` | 结束当前调试会话 |
-| `stop` | 查看当前停站现场（状态/位置/函数/断点/TOPENT，可反复取用） |
-| `source` | 读服务器源码（登录区源码目录白名单只读，`--from/--to` 取行段） |
+| `stop` | 查看当前停站现场（状态/位置/函数/断点/TOPENT，可反复取用；带 `waitingForUser`/`waitingKind`） |
+| `why` | 探测程序此刻在**等用户操作**还是在**空转**（interrupt → where → 判定停站行是否交互语句；默认探完自动放回，`--no-resume` 保留现场） |
+| `wait` | 等会话事件（`--for stopped,exit,dead,watchdog`、`--timeout`）：事件一到即返回，超时返回 `timedOut`（不是错误） |
+| `source` | 读服务器源码（登录区源码目录白名单只读，`--from/--to` 取行段，`--path-only` 只要行数与本地副本路径）；每次读取都会落一份本地副本供整读 |
 | `logs` | 会话最近事件（`--tail N`） |
 | `locate <函数>` | 定位函数定义到 文件:行（需停站） |
 | `resolve <作业>` | 解析作业编号 → 实体程序/模块（不建会话） |
 | `interrupt` | 中断运行中/卡住的程序，回到调试器 |
 | `env [环境名]` | 查看/切换当前生效的调试环境（SSH 配置） |
 | `topent [值]` | 查看/设置会话级 TOPENT override（`--clear` 清除） |
-| `wslogs` | 接口报文日志列表（`--service`、`--server`、`--origin`、`--result`、`--from`/`--to`、`--fail`、`--page`；条件口径对齐 T100 原生 awsq990） |
-| `wsdebug <rowid>` | 按日志报文参数重放调试，停在入口 |
+| `wslogs` | 接口报文日志列表（`--job` 作业编号(支持通配，按作业找日志用这个)、`--service` 服务名、`--server`、`--origin`、`--result`、`--pid`、`--from`/`--to`、`--fail`、`--page`、`--show <rowid>` 看单条报文；条件口径对齐 T100 原生 awsq990） |
+| `wsdebug <rowid>` | 按日志报文参数重放调试，停在入口；`--set 路径=值` 改入参再重放（可重复）、`--request-file` 整份替换报文；启动后打印实际生效的 TOPENT（它不是数字时会提示） |
 | `db [--ent N]` | 数据库连接探查：企业(TOPENT) → 账号映射与连接验证 |
 | `probe` | 协议驱动器自检尖刺：登录→启动→下断点→步进→求值（`-m/-p/-l`） |
 | `install skills` | 把 exe 同目录的 `skills/` 复制到目标目录（`--to <dir>` 换目标、`--force` 覆盖；默认 `<当前目录>/skills`） |

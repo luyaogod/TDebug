@@ -58,6 +58,48 @@ func TestWSLogWhere(t *testing.T) {
 			want: []string{"wsfa006 = '000'"},
 		},
 		{
+			// 界面「服务程序」列就是 wsfa002。用它 + 服务名可精确定位某一次调用,
+			// 也是 rowid/ctid 失效(日志表 purge 或重组)时的回退定位手段。
+			name: "服务程序序号:按 wsfa002 等值",
+			f:    WSLogFilter{Service: "wssp01131", PID: "861637"},
+			want: []string{"UPPER(wsfa001) LIKE 'WSSP01131'", "wsfa002 = '861637'"},
+		},
+		{
+			name: "服务程序序号:带单引号退化为空集(与其它等值条件同一白名单)",
+			f:    WSLogFilter{PID: "1' OR '1'='1"},
+			want: []string{"AND 1=0"},
+			not:  []string{"OR '1'"},
+		},
+		{
+			// wsfa012 作业编号。按"哪个作业"找日志的唯一入口 ——
+			// 服务名是 oa.schema.data.get 这类反域名,光看服务名认不出是什么作业。
+			name: "作业编号:通配符翻译为 LIKE 且大写",
+			f:    WSLogFilter{Job: "wssp*"},
+			want: []string{"UPPER(wsfa012) LIKE 'WSSP%'"},
+			not:  []string{"UPPER(wsfa001) LIKE"},
+		},
+		{
+			name: "作业编号:精确值退化为等价的 LIKE(与原生 = 结果一致)",
+			f:    WSLogFilter{Job: "wssp01131"},
+			want: []string{"UPPER(wsfa012) LIKE 'WSSP01131'"},
+		},
+		{
+			name: "作业编号:? 翻译为 _",
+			f:    WSLogFilter{Job: "wssp0113?"},
+			want: []string{"UPPER(wsfa012) LIKE 'WSSP0113_'"},
+		},
+		{
+			name: "作业编号:非法字符退化为空集(与 service 同一白名单)",
+			f:    WSLogFilter{Job: "a'; DROP"},
+			want: []string{"AND 1=0"},
+			not:  []string{"DROP"},
+		},
+		{
+			name: "作业编号与服务名可叠加(AND)",
+			f:    WSLogFilter{Service: "oa.schema.data.get", Job: "wssp01131"},
+			want: []string{"UPPER(wsfa001) LIKE 'OA.SCHEMA.DATA.GET'", "UPPER(wsfa012) LIKE 'WSSP01131'"},
+		},
+		{
 			name: "仅失败:本工具扩展",
 			f:    WSLogFilter{OnlyFail: true},
 			want: []string{"wsfa006 <> '000'"},

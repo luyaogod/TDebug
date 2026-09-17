@@ -119,4 +119,61 @@ assert.equal(S().currentLine, 500, '停站/步进定位应照旧搬动黄色高�
 assert.equal(S().revealReq.nav, false)
 console.log('OK 8) 断点跳转只滚视口,黄色停站高亮不动')
 
-console.log('\n全部通过: 8/8')
+// ---------- 9) 源码取不到一次,不得把该文件永久钉成空白 ----------
+//
+// refreshSource 的"同文件已加载"早退只看 sourceDVM,而**取不到源码时也会把 sourceDVM
+// 记成该文件**(为的是别把停站行画在旧文件上)。两者一撞就是死结:失败一次之后,
+// 每次同文件停站都在早退分支直接 return —— 代码视图永远空白,而服务器明明有源码。
+let srcMode = 'ok'
+globalThis.fetch = async (url) => {
+  if (String(url).includes('/source')) {
+    if (srcMode === 'fail') return { ok: false, status: 500, json: async () => ({ error: '暂时取不到' }) }
+    return {
+      ok: true, status: 200,
+      json: async () => ({ ok: true, source: { path: '/u1/asf/4gl/asf_x.4gl', content: 'MAIN\nEND MAIN', dvmFile: 'asf_x.4gl' } }),
+    }
+  }
+  return { ok: true, status: 200, json: async () => ({ ok: true }) }
+}
+
+useStore.setState({
+  sessionId: 'sx', module: 'asf', prog: 'bsft001_wf', activeTab: 'debug',
+  sourceDVM: '', sourceMissing: false, sourceContent: '', loadingSource: false,
+})
+
+srcMode = 'fail'
+await S().refreshSource('asf_x.4gl')
+assert.equal(S().sourceDVM, 'asf_x.4gl', '取不到时仍要记 DVM(否则停站行会画在旧文件上)')
+assert.equal(S().sourceContent, '', '取不到就是空')
+assert.equal(S().loadingSource, false, '失败也必须退出加载态,不能一直转圈')
+assert.equal(S().sourceMissing, true, '要标记 missing,供后续重试判断')
+
+srcMode = 'ok'
+await S().refreshSource('asf_x.4gl')
+assert.equal(S().sourceContent, 'MAIN\nEND MAIN', '服务器恢复后必须重新加载(旧实现这里永久空白)')
+assert.equal(S().sourceMissing, false)
+console.log('OK 9) 源码取不到后恢复能重新加载(missing 不再被 sourceDVM 早退吞掉)')
+
+// ---------- 10) 去抖落位走"不加载"分支时,必须收掉加载态 ----------
+//
+// case 'stopped' 在跨文件停站时置 loadingSource=true,并排一次 150ms 去抖落位。
+// 若这 150ms 内源码已被别的路径(快照轮询)加载好,去抖就会走"同文件只落光标"分支 ——
+// 那条分支以前不清 loadingSource,于是转圈框永远挂在编辑器上。
+const pending = []
+globalThis.window.setTimeout = (fn) => { pending.push(fn); return pending.length }
+globalThis.window.clearTimeout = () => {}
+
+useStore.setState({
+  sessionId: 'sx', activeTab: 'debug', state: 'running',
+  sourceDVM: 'asf_x.4gl', sourceMissing: false, sourceContent: 'MAIN\nEND MAIN', loadingSource: false,
+})
+S().onEvent({ type: 'stopped', sessionId: 'sx', stop: { reason: 'breakpoint', file: 'bsft001_wf.4gl', line: 12 } })
+assert.equal(S().loadingSource, true, '跨文件停站的瞬间应进入加载态')
+
+// 去抖窗口内,快照轮询那条路径已经把新文件加载好了
+useStore.setState({ sourceDVM: 'bsft001_wf.4gl', sourceContent: 'MAIN\nEND MAIN' })
+for (const fn of pending.splice(0)) await fn()
+assert.equal(S().loadingSource, false, '去抖走"同文件只落光标"分支时也必须收掉加载态')
+console.log('OK 10) 停站落位不再把加载态永久留在界面上')
+
+console.log('\n全部通过: 10/10')

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { api, type Event, type StopInfo, type Breakpoint, type Frame, type VarItem, type WSLogItem, type WSLogContent, type WSLogQuery, type WSTestResult } from './api'
+import { api, type Event, type StopInfo, type Breakpoint, type Frame, type VarItem, type WSLogItem, type WSLogContent, type WSLogQuery, type WSTestResult, type InflightInfo } from './api'
 import { THEME_KEY, applyDark, readStoredTheme, resolveDark, watchSystemTheme, type ThemeMode } from './theme'
 export type { ThemeMode }
 
@@ -59,6 +59,9 @@ interface Store {
   autovars: VarItem[] // 停站自动变量(当前源码窗内变量的自动求值)
   selectedFrame: number // 当前选中栈帧(-1 = 未选)
   backendDead: string // 后端死亡/程序退出原因(空 = 正常)
+  // 谁在驾驶 + 正在执行哪条命令(来自快照;协作模式下界面靠它收敛成观察台)
+  mode: 'solo' | 'collab'
+  inflight: InflightInfo | null
   timeline: TimelineItem[]
   rawLog: string[]
   runProg: string // gzzz_t 解析出的实体程序(源码命名/预取用);空 = 与 prog 相同
@@ -86,6 +89,11 @@ interface Store {
   sourceContent: string
   sourcePath: string
   sourceDVM: string // 当前已加载源码对应的 DVM 模块文件名(无源码模块也记录,避免错文件高亮)
+  // 该 DVM 的源码**没取到**(com 公共库只有 42m / 服务器暂时读不到)。
+  // 必须与 sourceDVM 分开记:失败时 sourceDVM 也要更新(否则停站行会画在旧文件上),
+  // 但若只凭 sourceDVM 判"同文件已加载",失败一次就把这个文件永久钉成了空白 ——
+  // 之后每次 refreshSource 都在同文件分支直接 return,再也不重试。
+  sourceMissing: boolean
   currentLine: number
   loadingSource: boolean
   lineOffset: number // 行号校准偏移:DVM 行号 - 磁盘行号(>0 时 Monaco 顶部前插 offset 行对齐协议流)
@@ -107,6 +115,8 @@ interface Store {
   sendRaw: (cmd: string) => Promise<void>
   pushTimeline: (item: Omit<TimelineItem, 'time'>) => void
   onEvent: (ev: Event) => void
+  // WS 开场补发:只把历史填进时间线,不触发任何副作用
+  onReplay: (ev: Event) => void
   setView: (v: 'debug' | 'wslogs' | 'wstest' | 'settings') => void
   setLaunchError: (msg: string) => void
   setTheme: (t: ThemeMode) => void
@@ -136,6 +146,8 @@ interface Store {
   jumpToBp: (b: Breakpoint) => Promise<void>
   runToCursor: (line: number) => Promise<void>
   control: (action: string, arg?: string) => Promise<void>
+  // 切换模式(纯人工/协作)
+  setMode: (mode: 'solo' | 'collab') => Promise<void>
   toggleBreakpoint: (line: number) => Promise<void>
   removeBreakpoint: (num: number) => Promise<void>
   quit: () => Promise<void>
@@ -174,6 +186,50 @@ function isRetiringTeardown(ev: Event): boolean {
 }
 
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }) }
+
+// ---------- 事件去重与停站落位节流 ----------
+//
+// seenSeq/seenEpoch 是模块级而非 store 字段:每次事件都 set() 会引发无谓重渲染。
+// WS 开场补发的那批历史会与已有时间线重叠,靠序号去重;服务端重启后序号归零,
+// 靠 epoch 变化来重置游标。
+let seenSeq = 0
+let seenEpoch = ''
+
+// 停站落位的尾随去抖:AI 快速连续单步时把多次位置变化合并成最后一次落位,
+// 免得代码画面逐行闪。
+// **只节流渲染,不节流事件** —— 每一步都照常进时间线,历史一条不少;
+// 单步慢的时候(continue 命中断点、单次 next)窗口内只有一个目标,仍然立即落位。
+let revealTimer: number | undefined
+let pendingReveal: { file?: string; line: number } | null = null
+const REVEAL_DEBOUNCE_MS = 150
+
+function scheduleReveal(set: (p: Partial<Store>) => void, get: () => Store, file: string | undefined, line: number) {
+  pendingReveal = { file, line }
+  if (revealTimer) clearTimeout(revealTimer)
+  revealTimer = window.setTimeout(async () => {
+    revealTimer = undefined
+    const target = pendingReveal
+    pendingReveal = null
+    if (!target) return
+    // 只在调试页时跟随:用户正在浏览别的文件时不抢他的视线(时间线仍记录,可点回)
+    if (get().activeTab !== 'debug') {
+      set({ loadingSource: false })
+      return
+    }
+    // 需要重新取源码的两种情形:跨文件,或这个文件上次没取到(见 sourceMissing)。
+    // 条件必须与 refreshSource 的同文件早退保持一致 —— 否则两条路径对"要不要加载"
+    // 的判断相反:这边认定不用加载(于是只落光标),那边却因为 loadingSource 还是 true
+    // 一直转圈,代码永远出不来。
+    if (target.file && (target.file !== get().sourceDVM || get().sourceMissing)) {
+      await get().refreshSource(target.file, target.line)
+    } else if (target.line) {
+      set({ loadingSource: false })
+      get().reveal('debug', target.line)
+    } else {
+      set({ loadingSource: false })
+    }
+  }, REVEAL_DEBOUNCE_MS)
+}
 
 // 跳到 MAIN 语句行(无停站位置时给用户一个可点断点的起点)
 function jumpToMain(set: (p: Partial<Store>) => void, get: () => Store) {
@@ -220,6 +276,7 @@ export const useStore = create<Store>((set, get) => ({
   // 右侧边栏默认落在「会话」(先选环境再调试);Tab 顺序见 App.tsx 右侧切换栏,不做持久化
   rightView: 'session',
   breakpoints: [], adjustedBps: {}, frames: [], watches: [], autovars: [], selectedFrame: -1, backendDead: '',
+  mode: 'solo' as 'solo' | 'collab', inflight: null,
   timeline: [], rawLog: [],
   runProg: '',
   view: 'debug',
@@ -229,7 +286,7 @@ export const useStore = create<Store>((set, get) => ({
   wsLogSel: null, wsLogContent: null, wsLogTab: 'info', wsLogErr: '',
   wsTestMode: '3', wsTestUrl: '', wsTestBody: '', wsTestSoap: false,
   wsTestResult: null, wsTestRunning: false, wsTestErr: '',
-  sourceContent: '', sourcePath: '', sourceDVM: '', currentLine: 0, loadingSource: false, lineOffset: 0,
+  sourceContent: '', sourcePath: '', sourceDVM: '', sourceMissing: false, currentLine: 0, loadingSource: false, lineOffset: 0,
   tabs: [], activeTab: 'debug', revealReq: null,
 
   setWsConnected: (b) => set({ wsConnected: b }),
@@ -293,6 +350,12 @@ export const useStore = create<Store>((set, get) => ({
     if (st.sessionId && ev.sessionId && ev.sessionId !== st.sessionId) return
     // 刚点重放/重新开始:旧会话的收尾事件不得清掉新会话的加载态(见 retireID 注释)
     if (isRetiringTeardown(ev)) return
+    // 序号去重:开场补发与流式之间可能重叠(服务端注释里说明了这点),
+    // 同一序号只处理一次。无序号的事件(本地合成)照常处理。
+    if (ev.seq) {
+      if (ev.seq <= seenSeq) return
+      seenSeq = ev.seq
+    }
     switch (ev.type) {
       case 'output':
         st.pushRaw(ev.text || '')
@@ -332,9 +395,17 @@ export const useStore = create<Store>((set, get) => ({
         return
       case 'stopped': {
         // 跨文件停站:先收光标(源码未就位时不画停站行,防它在旧文件上错位),
-        // refreshSource 拉到新源码后再一次性落位
-        const nl = !!ev.stop?.file && ev.stop.file !== get().sourceDVM
-        set({ stop: ev.stop || null, state: 'stopped', currentLine: nl ? 0 : (ev.stop?.line || get().currentLine), selectedFrame: -1, loadingSource: nl, activeTab: 'debug' })
+        // 拉到新源码后再一次性落位
+        const nl = !!ev.stop?.file && (ev.stop.file !== get().sourceDVM || get().sourceMissing)
+        // 只在调试页时跟随:用户正在浏览别的文件就**不抢他的视线**(仍记时间线,可点回)
+        const follow = get().activeTab === 'debug'
+        set({
+          stop: ev.stop || null, state: 'stopped',
+          currentLine: nl ? 0 : (ev.stop?.line || get().currentLine),
+          selectedFrame: -1, loadingSource: follow && nl,
+          ...(follow ? { activeTab: 'debug' as const } : {}),
+        })
+        // 时间线不节流:每一步都记,历史一条不少
         st.pushTimeline({
           origin: 'system', kind: 'stop',
           text: `停站[${ev.stop?.reason}] ${ev.stop?.file || ''}:${ev.stop?.line ?? ''} ${ev.stop?.func || ''}`,
@@ -348,7 +419,8 @@ export const useStore = create<Store>((set, get) => ({
             file = frames[0]?.file
             frameLine = frames[0]?.line ?? 0
           }
-          await get().refreshSource(file, frameLine || ev.stop?.line || 0)
+          // 落位走尾随去抖(只节流渲染):AI 连续单步时合并到最终位置
+          scheduleReveal(set, get, file, frameLine || ev.stop?.line || 0)
           await get().refreshWatches()
           await get().refreshSnapshot()
         })()
@@ -360,6 +432,9 @@ export const useStore = create<Store>((set, get) => ({
         return
       case 'ai_action':
         st.pushTimeline({ origin: 'ai', kind: 'command', text: ev.text || '' })
+        // 断点变更与模式切换会改变会话状态,拉一次快照让它们立刻反映到界面上
+        // (断点列表只从快照取 —— AI 下的断点要马上出现在 gutter 里)
+        if (ev.action?.startsWith('bp.') || ev.action === 'session.mode') void get().refreshSnapshot()
         return
       case 'log': {
         const text = ev.text || ''
@@ -374,6 +449,36 @@ export const useStore = create<Store>((set, get) => ({
         }
         return
       }
+    }
+  },
+
+  // WS 开场补发:把历史填进时间线,让刷新页面后仍能看到"刚才发生了什么"。
+  // **只追加时间线,不触发任何副作用** —— 不刷源码/栈、不起计时器;页面状态
+  // 另有 refreshSnapshot 负责,两者不打架。序号去重与 onEvent 共用同一游标,
+  // 所以重连时重复补发是幂等的。
+  onReplay: (ev) => {
+    const st = get()
+    if (st.sessionId && ev.sessionId && ev.sessionId !== st.sessionId) return
+    if (ev.seq) {
+      if (ev.seq <= seenSeq) return
+      seenSeq = ev.seq
+    }
+    switch (ev.type) {
+      case 'stopped':
+        st.pushTimeline({
+          origin: 'system', kind: 'stop',
+          text: `停站[${ev.stop?.reason}] ${ev.stop?.file || ''}:${ev.stop?.line ?? ''} ${ev.stop?.func || ''}`,
+        })
+        break
+      case 'ai_action':
+        st.pushTimeline({ origin: 'ai', kind: 'command', text: ev.text || '' })
+        break
+      case 'log':
+        st.pushTimeline({ origin: 'system', kind: 'info', text: ev.text || '' })
+        break
+      case 'watchdog':
+        st.pushTimeline({ origin: 'system', kind: 'warn', text: ev.text || '看门狗触发' })
+        break
     }
   },
 
@@ -547,7 +652,7 @@ export const useStore = create<Store>((set, get) => ({
       sessionId: null,
       timeline: [], rawLog: [], watches: [], autovars: [], backendDead: '',
       selectedFrame: -1, stop: null, frames: [], breakpoints: [],
-      sourceContent: '', sourcePath: '', sourceDVM: '', currentLine: 0, lineOffset: 0,
+      sourceContent: '', sourcePath: '', sourceDVM: '', sourceMissing: false, currentLine: 0, lineOffset: 0,
       loadingSource: true, lastReplayRowid: rowid, lastReplayRequest: request ?? '',
     })
     try {
@@ -557,7 +662,7 @@ export const useStore = create<Store>((set, get) => ({
       const rp = r.runProg || r.prog || ''
       set({
         sessionId: r.sessionId, module: mod, prog: r.prog || rp,
-        runProg: rp, state: 'loading', sourceDVM: '', currentLine: 0, loadingSource: true,
+        runProg: rp, state: 'loading', sourceDVM: '', sourceMissing: false, currentLine: 0, loadingSource: true,
       })
       // 入口停站前保持加载态,源码由会话路径加载并定位 MAIN
       pollUntilStopped(set, get)
@@ -574,7 +679,7 @@ export const useStore = create<Store>((set, get) => ({
     set({ launching: true, launchError: '', timeline: [], rawLog: [], watches: [], autovars: [], backendDead: '', selectedFrame: -1, lastReplayRowid: null, lastReplayRequest: '' })
     // 启动调试:编辑器进入加载态(转圈),入口停站定位 MAIN 后一次性显示源码,
     // 避免启动过程中内容跳来跳去
-    set({ sourceContent: '', sourcePath: '', sourceDVM: '', currentLine: 0, loadingSource: true })
+    set({ sourceContent: '', sourcePath: '', sourceDVM: '', sourceMissing: false, currentLine: 0, loadingSource: true })
     // 同 replayStart:上一会话(同目标会被复用,ID 与新一轮相同)的收尾事件不得清掉加载态
     beginRetire(get().sessionId)
     try {
@@ -611,6 +716,9 @@ export const useStore = create<Store>((set, get) => ({
         started: !!snap.started,
         holdingSeconds: snap.holdingSeconds || 0,
         sessionEnv: snap.env || get().sessionEnv,
+        // 谁在驾驶 + 正在执行哪条命令(界面按它收敛写操作、显示 inflight)
+        mode: snap.mode === 'collab' ? 'collab' : 'solo',
+        inflight: snap.inflight || null,
         // 免模块启动时后端会按作业名解析模块,回读给前端(源码兜底路径依赖它)
         module: snap.module || get().module,
         runProg: snap.runProg || get().runProg,
@@ -638,8 +746,8 @@ export const useStore = create<Store>((set, get) => ({
       // 入口停站:后端已给出真实源文件(转客制作业是 cpm_xxx.4gl),仍需定位 MAIN
       entryMode = true
     }
-    if (f === sourceDVM) {
-      // 同文件:行号直接落位
+    if (f === sourceDVM && !get().sourceMissing) {
+      // 同文件且**确认加载过**:行号直接落位
       if (line) set({ currentLine: line })
       return
     }
@@ -648,7 +756,7 @@ export const useStore = create<Store>((set, get) => ({
     set({ loadingSource: true, currentLine: 0, lineOffset: 0 })
     try {
       const { source } = await api.sourceByFile(sessionId, f, module)
-      set({ sourceContent: source.content, sourcePath: source.path, sourceDVM: f })
+      set({ sourceContent: source.content, sourcePath: source.path, sourceDVM: f, sourceMissing: false })
       const st = get()
       if (line) {
         set({ currentLine: line })
@@ -667,7 +775,7 @@ export const useStore = create<Store>((set, get) => ({
         // 客制母版回退:cpm_apmt580_wf.4gl(首字母 a→c 的客制目录命名)
         try {
           const { source } = await api.sourceByFile(sessionId, `c${module}_${runProg || prog}.4gl`, module)
-          set({ sourceContent: source.content, sourcePath: source.path, sourceDVM: f })
+          set({ sourceContent: source.content, sourcePath: source.path, sourceDVM: f, sourceMissing: false })
           if (get().currentLine === 0) {
             jumpToMain(set, get)
             get().pushTimeline({ origin: 'system', kind: 'info', text: '入口停站:已显示客制源码,点击行号下断点后点「继续 F5」开始' })
@@ -676,7 +784,9 @@ export const useStore = create<Store>((set, get) => ({
           return
         } catch { /* 客制也没有 */ }
       }
-      set({ sourceContent: '', sourcePath: '', sourceDVM: f })
+      // 取不到源码:DVM 仍要记为 f(否则停站行会画在旧文件上),但要标 missing ——
+      // 下一次同文件停站必须重新尝试,不能因为"已经记过 DVM"就永久空白
+      set({ sourceContent: '', sourcePath: '', sourceDVM: f, sourceMissing: true })
       if (line) set({ currentLine: line })
     } finally {
       set({ loadingSource: false })
@@ -727,23 +837,35 @@ export const useStore = create<Store>((set, get) => ({
       if (action !== 'interrupt') {
         await get().refreshSnapshot()
         const st = get()
-        // 步进可能跨模块:停站文件与当前显示源码不同时,跟随切换(源码到位才落光标)
-        if (st.stop?.file && st.stop.file !== st.sourceDVM) void st.refreshSource(st.stop.file, resp?.stop?.line)
-        // 停站后按面板开关同步调用栈与监视取值
-        if (st.state === 'stopped') {
-          if (get().stackAuto) void st.refreshFrames()
-          void st.refreshWatches()
-        }
+        // 停站后按面板开关同步调用栈取值
+        if (st.state === 'stopped' && get().stackAuto) void st.refreshFrames()
       }
       if (action === 'run' || action === 'continue') pollUntilStopped(set, get)
-      if (resp?.stop && (action === 'next' || action === 'step' || action === 'finish' || action === 'until')) {
-        const nl = !!resp.stop.file && resp.stop.file !== get().sourceDVM
-        set({ selectedFrame: -1, loadingSource: nl, activeTab: 'debug' })
-        if (nl) void get().refreshSource(resp.stop.file, resp.stop.line) // 完成→reveal
-        else get().reveal('debug', resp.stop.line ?? 0)
-      }
+      // 光标落位**不在这里做** —— 服务端的 stopped 事件由 onEvent 统一处理,
+      // 人与 AI 由此走同一条路径。以前只有这里能落位,所以 AI 的步进/继续
+      // 在界面上完全不可见(服务端的同步路径以前根本不发 stopped 事件)。
+      // 保留响应路径反而会引入乱序:AI 紧接着再走一步时,这里的旧 stop
+      // 会把光标拽回去。代价是落位依赖 WS 存活,断线由 backendDead 兜住。
+      void resp
     } catch (e: any) {
       get().pushTimeline({ origin: 'system', kind: 'warn', text: `${action} 失败: ${e.message}` })
+    }
+  },
+
+  // 切模式(纯人工/协作)。人可任意方向切 —— 这是"协作模式下不被锁死"的逃生舱口;
+  // AI 侧不能自行解除纯人工模式(服务端会 403)。
+  setMode: async (mode) => {
+    const { sessionId } = get()
+    if (!sessionId) return
+    try {
+      await api.setMode(sessionId, mode)
+      await get().refreshSnapshot() // mode 从快照回读,与 AI 发起的切换走同一条路
+      get().pushTimeline({
+        origin: 'human', kind: 'command',
+        text: mode === 'collab' ? '交给 AI:协作模式' : '接管:纯人工模式',
+      })
+    } catch (e: any) {
+      get().pushTimeline({ origin: 'system', kind: 'warn', text: `切换模式失败: ${e.message}` })
     }
   },
 
@@ -866,7 +988,7 @@ export const useStore = create<Store>((set, get) => ({
     } else {
       set({
         sessionId: null, module: '', prog: '', runProg: '', sessionEnv: '', state: '', ...base,
-        backendDead: '', tabs: [], activeTab: 'debug', sourceContent: '', sourcePath: '', sourceDVM: '', lineOffset: 0,
+        backendDead: '', tabs: [], activeTab: 'debug', sourceContent: '', sourcePath: '', sourceDVM: '', sourceMissing: false, lineOffset: 0,
       })
     }
   },
@@ -1095,7 +1217,19 @@ export function connectWS() {
     }
     ws.onmessage = (m) => {
       try {
-        const ev: Event = JSON.parse(m.data)
+        const ev: any = JSON.parse(m.data)
+        // 建连开场:先补发一帧历史(填时间线),再是 hello 哨兵,之后才是流式事件。
+        // epoch 变了说明服务端重启过 —— 序号已归零,重置去重游标。
+        if (ev.type === 'replay' || ev.type === 'hello') {
+          const epoch = String(ev.epoch || '')
+          if (epoch && epoch !== seenEpoch) {
+            seenEpoch = epoch
+            seenSeq = 0
+          }
+          const replay = useStore.getState().onReplay
+          for (const e of (ev.events || []) as Event[]) replay(e)
+          return
+        }
         onEvent(ev)
       } catch { pushRaw(String(m.data)) }
     }

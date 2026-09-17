@@ -8,11 +8,20 @@ export interface StopInfo {
 export interface Breakpoint { num: number; file: string; line: number; func?: string; enabled: boolean; note?: string }
 export interface VarItem { expr: string; value?: string }
 export interface VarDecl { name: string; type: string }
+// 正在执行的那条命令 —— 界面上的「AI 正在执行 continue(已 12s)」
+export interface InflightInfo { cmd: string; since: string; elapsed: number }
 export interface SessionBrief {
   id: string; module: string; prog: string; runProg?: string; state: string
   env?: string
   file?: string; line?: number; func?: string; reason?: string
   holdingSeconds: number; breakpoints: number; watchdogSeconds: number
+  // 谁在驾驶:solo(纯人工)| collab(协作,AI 主导)
+  mode?: string
+  inflight?: InflightInfo
+  // 停站行本身就是交互语句(程序把控制权交给了界面)
+  waitingForUser?: boolean; waitingKind?: string
+  // 运行态下距最近一次协议输出的秒数
+  silentSeconds?: number
 }
 export interface WSLogItem {
   rowid: string; service: string; pid: string
@@ -35,9 +44,11 @@ export interface WSLogContent {
 // result/origin/server 为等值过滤(wsfa006/wsfa013/wsfa018)
 export interface WSLogQuery {
   service?: string
+  job?: string // wsfa012 作业编号(支持 * ? 通配)—— 服务名是反域名,按作业找日志靠这个
   result?: string
   origin?: string
   server?: string
+  pid?: string // wsfa002 服务程序序号(界面「服务程序」列;与 service 一起可精确定位某一次调用)
   onlyFail?: boolean
   page?: number
   startFrom?: string
@@ -51,12 +62,24 @@ export interface WSTestResult {
 export interface Event {
   type: string; sessionId: string; time: string
   state?: string; stop?: StopInfo; vars?: VarItem[]; text?: string
+  // 单调递增序号(服务端分配):WS 开场补发与去重用
+  seq?: number
+  // 谁发起的:ai | human | system
+  actor?: string
+  // 机器可读的动作名(bp.add / control.step / session.mode …),text 是给人看的
+  action?: string
 }
 
+// WS 建连时的开场补发帧:只追加时间线,不触发任何副作用
+export interface ReplayFrame { type: 'replay'; epoch: string; events: Event[] }
+
+// 浏览器不声明 X-Actor —— 服务端不认这个头时一律按 human 处理(CLI 才声明 ai)。
+// 注意 headers 必须在 opts 之后合并:早先写成 { headers: 默认, ...opts } 时,
+// 调用方只要自带 headers 就会把默认头整块覆盖掉。
 async function req<T>(url: string, opts?: RequestInit): Promise<T> {
   const r = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
     ...opts,
+    headers: { 'Content-Type': 'application/json', ...(opts?.headers || {}) },
   })
   const data = await r.json().catch(() => ({}))
   if (!r.ok || data.ok === false) throw new Error(data.error || `HTTP ${r.status}`)
@@ -93,6 +116,9 @@ export const api = {
   bpDel: (id: string, num: number) => req<any>(`/api/sessions/${id}/breakpoints/${num}`, { method: 'DELETE' }),
   control: (id: string, action: string, arg?: string) =>
     req<any>(`/api/sessions/${id}/control`, { method: 'POST', body: JSON.stringify({ action, arg }) }),
+  // 切模式(纯人工/协作)。人可任意方向切;AI 不能自行解除纯人工模式(服务端 403)
+  setMode: (id: string, mode: 'solo' | 'collab') =>
+    req<{ mode: string }>(`/api/sessions/${id}/mode`, { method: 'POST', body: JSON.stringify({ mode }) }),
   print: (id: string, expr: string) => req<{ value: string }>(`/api/sessions/${id}/print`, { method: 'POST', body: JSON.stringify({ expr }) }),
   where: (id: string) => req<{ frames: Frame[] }>(`/api/sessions/${id}/where`, { method: 'POST' }),
   raw: (id: string, command: string) => req<{ lines: string[] }>(`/api/sessions/${id}/raw`, { method: 'POST', body: JSON.stringify({ command }) }),

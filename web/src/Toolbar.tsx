@@ -100,6 +100,9 @@ export function Toolbar() {
   const stopped = state === 'stopped'
   // 存在本轮调试(idle/exit/无会话之外)时才允许「结束调试」/步进类
   const inRun = !!sessionId && state !== '' && state !== 'exit' && state !== 'idle'
+  // 协作模式下这些写操作归 AI —— 界面收敛成观察台。服务端同样会 403,
+  // 这里禁用只是不让界面装作能做;原因写在底部状态栏的横幅上。
+  const ro = useStore((s) => s.mode) === 'collab'
 
   return (
     <>
@@ -122,17 +125,17 @@ export function Toolbar() {
       {/* 浮动调试工具条(有会话且在调试视图时显示) */}
       {view === 'debug' && (
         <FloatingToolbar>
-          <ToolIcon icon={StepForward} label="继续 (F5) — 运行到下一个断点" disabled={!stopped}
+          <ToolIcon icon={StepForward} label={ro ? '协作模式下由 AI 主导' : '继续 (F5) — 运行到下一个断点'} disabled={ro || !stopped}
             onClick={() => void control('continue')} />
-          <ToolIcon icon={RedoDot} label="步过 (F10)" disabled={!stopped}
+          <ToolIcon icon={RedoDot} label={ro ? '协作模式下由 AI 主导' : '步过 (F10)'} disabled={ro || !stopped}
             onClick={() => void control('next')} />
-          <ToolIcon icon={ArrowDownToDot} label="步入 (F11)" disabled={!stopped}
+          <ToolIcon icon={ArrowDownToDot} label={ro ? '协作模式下由 AI 主导' : '步入 (F11)'} disabled={ro || !stopped}
             onClick={() => void control('step')} />
-          <ToolIcon icon={ArrowUpFromDot} label="步出 (finish)" disabled={!stopped}
+          <ToolIcon icon={ArrowUpFromDot} label={ro ? '协作模式下由 AI 主导' : '步出 (finish)'} disabled={ro || !stopped}
             onClick={() => void control('finish')} />
-          <ToolIcon icon={RotateCcw} label="重新开始 — 复用会话重启同一作业" color="text-green-600 dark:text-green-400" disabled={launching || !sessionId}
+          <ToolIcon icon={RotateCcw} label={ro ? '协作模式下由 AI 主导' : '重新开始 — 复用会话重启同一作业'} color="text-green-600 dark:text-green-400" disabled={ro || launching || !sessionId}
             onClick={() => void restart()} />
-          <ToolIcon icon={Square} label="结束调试 — 只结束本轮运行(会话保留)" color="text-red-600 dark:text-red-400" disabled={!inRun}
+          <ToolIcon icon={Square} label={ro ? '协作模式下由 AI 主导' : '结束调试 — 只结束本轮运行(会话保留)'} color="text-red-600 dark:text-red-400" disabled={ro || !inRun}
             onClick={() => void quit()} />
         </FloatingToolbar>
       )}

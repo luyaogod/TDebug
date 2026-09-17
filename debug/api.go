@@ -154,6 +154,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{id}/restart", s.hSessionRestart)
 	mux.HandleFunc("POST /api/sessions/{id}/close", s.hSessionClose)
 	mux.HandleFunc("POST /api/sessions/{id}/topent", s.hTopent)
+	mux.HandleFunc("POST /api/sessions/{id}/mode", s.hMode)
 	mux.HandleFunc("POST /api/sessions/switch", s.hSessionSwitch)
 	mux.HandleFunc("GET /api/sessions/{id}/breakpoints", s.hBPList)
 	mux.HandleFunc("POST /api/sessions/{id}/breakpoints", s.hBPAdd)
@@ -162,6 +163,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sessions/{id}/print", s.hPrint)
 	mux.HandleFunc("POST /api/sessions/{id}/where", s.hWhere)
 	mux.HandleFunc("POST /api/sessions/{id}/raw", s.hRaw)
+	mux.HandleFunc("POST /api/sessions/{id}/why", s.hWhy)
+	mux.HandleFunc("GET /api/sessions/{id}/wait", s.hWait)
 	mux.HandleFunc("GET /api/sessions/{id}/locals", s.hLocals)
 	mux.HandleFunc("GET /api/sessions/{id}/globals", s.hGlobals)
 	mux.HandleFunc("GET /api/sessions/{id}/sources", s.hSources)
@@ -212,6 +215,144 @@ func (s *Server) sessOf(w http.ResponseWriter, r *http.Request) *Session {
 	sess := s.mgr.Get(id)
 	if sess == nil {
 		fail(w, 404, fmt.Errorf("会话不存在: %s", id))
+	}
+	return sess
+}
+
+// ---------- 归因与模式闸门 ----------
+
+// actorHeader 调用方声明自己是谁。人与 AI 打的是同一批 REST 端点,服务端分辨不出来,
+// 只能靠声明:CLI 统一带 X-Actor: ai,浏览器带 human(不带也按 human 算)。
+const actorHeader = "X-Actor"
+
+func actorOf(r *http.Request) string {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get(actorHeader)), "ai") {
+		return "ai"
+	}
+	return "human"
+}
+
+// launchModeFor 新会话的初始模式,由**发起方**决定:
+// AI 从 CLI 发起的调试(start / wsdebug)默认协作(人只读),人从界面发起的保持纯人工。
+// 两条启动路径(hLaunch / hWSLogDebug)必须都过这里 —— 漏一条就会出现
+// "AI 起出来的会话却写着纯人工、AI 自己被自己的闸门拦下"的怪状。
+func launchModeFor(r *http.Request) string {
+	if actorOf(r) == "ai" {
+		return ModeCollab
+	}
+	return ModeSolo
+}
+
+// MayWrite 该身份此刻能否对这个会话执行写操作。
+// 闸门是**会话级的静态标志**,不做逐命令协商 —— 原先设想的 holder/TTL/续期那一套
+// 最难的地方是服务端看不见 AI 的"一轮"(CLI 每次调用都是独立进程),降级成模式之后
+// 这一整块就不存在了。
+func (s *Session) MayWrite(actor string) bool {
+	if s.Mode() == ModeCollab {
+		return actor == "ai"
+	}
+	// solo:AI 只能读。否则"纯人工模式下 AI 只能读不能写"就是摆设。
+	return actor != "ai"
+}
+
+// writeDeniedMsg 拒绝文案要能直接照做,而不是只说"没权限"。
+func writeDeniedMsg(mode, actor string) string {
+	if mode == ModeCollab {
+		return "协作模式:本次调试由 AI 主导,请在对话中把操作委托给 AI(例如「在 4452 行下个断点」);" +
+			"需要自己动手请点界面上的「接管」。"
+	}
+	if actor == "ai" {
+		return "纯人工模式:AI 不可操作。请让用户在界面上点「交给 AI」,或由用户自己操作。"
+	}
+	return "当前模式不允许该操作"
+}
+
+// hMode 切换会话模式(纯人工 / 协作)。
+// body: {"mode": "solo"|"collab"}
+//
+// 规则收窄了一步,理由是字面对称会开一个洞:**人可任意方向切**(人始终有最终控制权);
+// **AI 只能请求,不能自升权限** —— 若 AI 能自己把 solo 切成 collab,那"纯人工模式下
+// AI 只能读不能写"就是摆设,它一秒钟就能把自己放出来。
+//
+// 切换**不中断在飞命令**,只改变"之后谁能写",所以本身没有竞态。
+func (s *Server) hMode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if !readBody(w, r, &req) {
+		return
+	}
+	m := strings.ToLower(strings.TrimSpace(req.Mode))
+	if m != ModeSolo && m != ModeCollab {
+		fail(w, 400, fmt.Errorf("mode 只能是 %s 或 %s", ModeSolo, ModeCollab))
+		return
+	}
+	sess := s.sessOf(w, r)
+	if sess == nil {
+		return
+	}
+	actor := actorOf(r)
+	if actor == "ai" && m == ModeCollab && sess.Mode() != ModeCollab {
+		fail(w, 403, fmt.Errorf("请让用户在界面上点「交给 AI」:AI 不能自行解除纯人工模式"))
+		return
+	}
+	text := map[string]string{ModeSolo: "已接管:纯人工模式", ModeCollab: "已交给 AI:协作模式"}[m]
+	sess.SetMode(m)
+	ev := Event{Type: "log", SessionID: sess.ID, Time: time.Now(), Actor: actor, Action: "session.mode", Text: text}
+	if actor == "ai" {
+		ev.Type = "ai_action" // 让时间线上明确标出是 AI 做的
+	}
+	s.mgr.emit(ev)
+	writeJSON(w, 200, map[string]any{"ok": true, "mode": m})
+}
+
+// sessOfWriteGlobal 用于**不按 {id} 定位**的写操作(切环境、按日志重放):
+// 以"当前会话"的模式为准。没有当前会话时放行 —— 没有东西可保护。
+// 归因留给调用方在操作成功之后自己调 emitAction(此时才有新会话 id)。
+//
+// 空会话同样放行:前端一连上来就会建一个还没挂程序的宿主会话,而它是 human 身份
+// 建的(→ 纯人工)。若把它也算作"要保护的一轮",AI 就被一个什么都没在跑的会话
+// 永远关在门外 —— 连自己发起调试都做不到。没有程序,就没有可被抢走的运行。
+func (s *Server) sessOfWriteGlobal(w http.ResponseWriter, r *http.Request) bool {
+	cur := s.mgr.Current()
+	if cur == nil || cur.Bare() {
+		return true
+	}
+	if actor := actorOf(r); !cur.MayWrite(actor) {
+		fail(w, 403, fmt.Errorf("%s", writeDeniedMsg(cur.Mode(), actor)))
+		return false
+	}
+	return true
+}
+
+// emitAction 把一次 AI 写操作记进操作时间线(前端按 origin:'ai' 渲染成蓝色行)。
+//
+// 在**操作成功之后**调用,不在放行时调用:被拒(模式闸门/上一条命令还在跑/参数错)
+// 的命令不该在时间线上留痕 —— 真机验证时,一次忙等把 60 多次失败的 next 全记了进去。
+// 长命令的"正在进行"由快照里的 inflight 承担(状态栏实时显示"⟳ next(已 12s)"),
+// 不需要时间线抢答。
+func (s *Server) emitAction(r *http.Request, sess *Session, action, text string) {
+	if sess == nil || actorOf(r) != "ai" {
+		return
+	}
+	s.mgr.emit(Event{
+		Type: "ai_action", SessionID: sess.ID, Time: time.Now(),
+		Actor: "ai", Action: action, Text: text,
+	})
+}
+
+// sessOfWrite 写操作的会话入口 = sessOf + 模式闸门。被拒时已写好 403 并返回 nil。
+//
+// 闸门是会话级的静态标志,不做逐命令协商:协作模式下只有 AI 能写,
+// 纯人工模式下只有人能写。切换靠界面上的按钮,不进这条路径。
+func (s *Server) sessOfWrite(w http.ResponseWriter, r *http.Request) *Session {
+	sess := s.sessOf(w, r)
+	if sess == nil {
+		return nil
+	}
+	if actor := actorOf(r); !sess.MayWrite(actor) {
+		fail(w, 403, fmt.Errorf("%s", writeDeniedMsg(sess.Mode(), actor)))
+		return nil
 	}
 	return sess
 }
@@ -310,10 +451,23 @@ func (s *Server) hLaunch(w http.ResponseWriter, r *http.Request) {
 		c2 = *c2.CloneWithZone(req.Zone)
 		cfg = &c2
 	}
+	// 启动会结束当前这次调试,所以它同样受模式闸门约束(无会话或空会话放行)
+	if !s.sessOfWriteGlobal(w, r) {
+		return
+	}
 	sess, err := s.mgr.LaunchWith(cfg, req.Module, req.Prog)
 	if err != nil {
 		fail(w, 409, err)
 		return
+	}
+	// 模式由发起方决定:AI 从 CLI 发起 → 协作(人只读);人从界面发起 → 纯人工(与旧行为一致)
+	sess.SetMode(launchModeFor(r))
+	if actorOf(r) == "ai" {
+		s.mgr.emit(Event{
+			Type: "ai_action", SessionID: sess.ID, Time: time.Now(),
+			Actor: "ai", Action: "session.launch",
+			Text: fmt.Sprintf("启动调试 %s/%s", req.Module, req.Prog),
+		})
 	}
 	go func() {
 		if err := sess.Launch(r.Context()); err != nil {
@@ -347,7 +501,7 @@ func (s *Server) hSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cur := sess.Cur()
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"ok": true,
 		"id": sess.ID, "module": sess.Module, "prog": sess.Prog, "runProg": sess.RunProg,
 		"env":   sess.EnvName(),
@@ -359,11 +513,26 @@ func (s *Server) hSnapshot(w http.ResponseWriter, r *http.Request) {
 		"topent":          sess.TopentOverride(),
 		"topentCfg":       sess.TopentCfg(),
 		"topentShell":     sess.TopentShell(),
-	})
+		// 运行态:静默多久 / 已跑多久。配合 why 判断"是在等用户还是在空转"。
+		"silentSeconds": sess.SilentSeconds(),
+		// 谁在驾驶 + 正在执行哪条命令(界面上的"AI 正在执行 continue(已 12s)")
+		"mode": sess.Mode(),
+	}
+	if fl := sess.Inflight(); fl != nil {
+		resp["inflight"] = fl
+	}
+	if since := sess.RunningSince(); !since.IsZero() {
+		resp["runningSince"] = since
+	}
+	if cur.WaitingForUser {
+		resp["waitingForUser"] = true
+		resp["waitingKind"] = cur.WaitingKind
+	}
+	writeJSON(w, 200, resp)
 }
 
 func (s *Server) hQuit(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
+	sess := s.sessOfWrite(w, r)
 	if sess == nil {
 		return
 	}
@@ -373,6 +542,7 @@ func (s *Server) hQuit(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	s.emitAction(r, sess, "session.quit", "结束本轮调试")
 	kept := sess.State() != StateExit
 	if !kept {
 		s.mgr.Remove(sess.ID)
@@ -414,7 +584,7 @@ func (s *Server) bootToIdle(ns *Session, ctx context.Context) {
 
 // hSessionClose 「结束会话」:结束当前 debug 并彻底断开连接(与设置默认解耦)
 func (s *Server) hSessionClose(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
+	sess := s.sessOfWrite(w, r)
 	if sess == nil {
 		return
 	}
@@ -422,13 +592,14 @@ func (s *Server) hSessionClose(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	s.emitAction(r, sess, "session.close", "关闭会话")
 	s.mgr.Remove(sess.ID)
 	writeJSON(w, 200, map[string]any{"ok": true, "state": "exit"})
 }
 
 // hSessionRestart 「重启会话」:断开并重连同环境,回到 idle 待启动
 func (s *Server) hSessionRestart(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
+	sess := s.sessOfWrite(w, r)
 	if sess == nil {
 		return
 	}
@@ -454,6 +625,7 @@ func (s *Server) hSessionRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mgr.emit(Event{Type: "log", Text: fmt.Sprintf("重启会话:重新连接 %s …", cfg.EnvName())})
+	s.emitAction(r, ns, "session.restart", "重新开始调试")
 	go s.bootToIdle(ns, r.Context())
 	writeJSON(w, 200, map[string]any{"ok": true, "sessionId": ns.ID, "env": cfg.EnvName(), "state": "loading"})
 }
@@ -462,10 +634,6 @@ func (s *Server) hSessionRestart(w http.ResponseWriter, r *http.Request) {
 // 仅允许 idle(宿主 shell 就绪、无调试运行);值不限数字/文本(导出为环境变量),
 // 服务端剔除两侧空白;留空 = 清除手动覆盖并重新下发配置默认。
 func (s *Server) hTopent(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	var req struct {
 		Value string `json:"value"`
 	}
@@ -473,6 +641,10 @@ func (s *Server) hTopent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Value = trimTopent(req.Value)
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
+		return
+	}
 	if st := sess.State(); st != StateIdle {
 		fail(w, 409, fmt.Errorf("仅会话空闲时可设置 TOPENT(当前 %s),请先结束当前调试", st))
 		return
@@ -481,6 +653,13 @@ func (s *Server) hTopent(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err)
 		return
 	}
+	txt := "设置 TOPENT"
+	if req.Value == "" {
+		txt += "(清除)"
+	} else {
+		txt += "=" + req.Value
+	}
+	s.emitAction(r, sess, "session.topent", txt)
 	writeJSON(w, 200, map[string]any{"ok": true, "topent": req.Value})
 }
 
@@ -503,6 +682,9 @@ func (s *Server) hSessionSwitch(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, fmt.Errorf("环境 %q 不存在(请在设置中添加)", req.Env))
 		return
 	}
+	if !s.sessOfWriteGlobal(w, r) {
+		return
+	}
 	if s.cfg.EnvName() != req.Env {
 		s.selectEnv(cfg)
 	}
@@ -522,6 +704,7 @@ func (s *Server) hSessionSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mgr.emit(Event{Type: "log", Text: fmt.Sprintf("切换会话:正在连接 %s …", req.Env)})
+	s.emitAction(r, ns, "session.switch", "切换环境到 "+req.Env)
 	go s.bootToIdle(ns, r.Context())
 	writeJSON(w, 200, map[string]any{"ok": true, "sessionId": ns.ID, "env": req.Env, "state": "loading"})
 }
@@ -537,14 +720,14 @@ func (s *Server) hBPList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hBPAdd(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	var req struct {
 		Location string `json:"location"` // 行号 / 函数名 / file:line
 	}
 	if !readBody(w, r, &req) {
+		return
+	}
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
 		return
 	}
 	log.Println("[bp-add] session=" + sess.ID + " loc=" + req.Location)
@@ -554,17 +737,19 @@ func (s *Server) hBPAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[bp-add] result #%d %s:%d", bp.Num, bp.File, bp.Line)
+	// 用 fgldb 落定后的实际位置(它会把非可执行行上的断点下移到下一条语句)
+	s.emitAction(r, sess, "bp.add", fmt.Sprintf("下断点 %s:%d", bp.File, bp.Line))
 	writeJSON(w, 200, map[string]any{"ok": true, "breakpoint": bp})
 }
 
 func (s *Server) hBPDel(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	num, err := strconv.Atoi(r.PathValue("num"))
 	if err != nil {
 		fail(w, 400, fmt.Errorf("断点编号无效"))
+		return
+	}
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
 		return
 	}
 	log.Println("[bp-del] session=" + sess.ID + " num=" + strconv.Itoa(num))
@@ -572,24 +757,38 @@ func (s *Server) hBPDel(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
+	s.emitAction(r, sess, "bp.del", fmt.Sprintf("删除断点 %d", num))
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // ---------- 控制 / 求值 ----------
 
 func (s *Server) hControl(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	var req struct {
 		Action string `json:"action"` // continue|run|next|step|finish|until|interrupt
 		Arg    string `json:"arg,omitempty"`
+		// Wait 软等待秒数(仅步进类):到点若程序仍在跑就返回 softTimeout。
+		// 步进可能撞上交互语句而长时间等用户,需要这条退路;continue/run 本来就立即返回。
+		Wait int `json:"wait"`
 	}
 	if !readBody(w, r, &req) {
 		return
 	}
+	// 闸门放在读 body 之后:这样归因文案能带上动作细节(continue / step 12 …)
+	txt := req.Action
+	if req.Arg != "" {
+		txt += " " + req.Arg
+	}
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
+		return
+	}
+	softWait := time.Duration(req.Wait) * time.Second
+	if softWait < 0 {
+		softWait = 0
+	}
 	var stop *StopInfo
+	var soft bool
 	var err error
 	switch req.Action {
 	case "continue":
@@ -597,13 +796,13 @@ func (s *Server) hControl(w http.ResponseWriter, r *http.Request) {
 	case "run":
 		_, err = sess.Run()
 	case "next", "step", "finish":
-		stop, err = sess.Step(req.Action)
+		stop, soft, err = sess.StepSoft(req.Action, softWait)
 	case "until":
 		loc := req.Arg
 		if loc == "" {
-			stop, err = sess.Step("until")
+			stop, soft, err = sess.StepSoft("until", softWait)
 		} else {
-			stop, err = sess.Step("until " + loc)
+			stop, soft, err = sess.StepSoft("until "+loc, softWait)
 		}
 	case "interrupt":
 		err = sess.Interrupt()
@@ -615,9 +814,16 @@ func (s *Server) hControl(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, err)
 		return
 	}
+	s.emitAction(r, sess, "control."+req.Action, txt)
 	resp := map[string]any{"ok": true, "state": string(sess.State())}
 	if stop != nil {
 		resp["stop"] = stop
+	}
+	if soft {
+		resp["softTimeout"] = true
+		resp["silentSeconds"] = sess.SilentSeconds()
+		resp["hint"] = "步进到点仍未停站:程序仍在运行(大概率停在了交互界面上等用户)。" +
+			"用 why 判断,或 wait 等它停下来"
 	}
 	writeJSON(w, 200, resp)
 }
@@ -655,13 +861,12 @@ func (s *Server) hWhere(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hRaw(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	var req struct {
 		Command string `json:"command"`
 		Timeout int    `json:"timeout"` // 等待命令完成的秒数(0=默认30);continue/until 等长命令可调大
+		// Wait 软等待秒数:到点若程序仍在跑就直接返回(softTimeout),**不发 SIGINT、不取消命令**。
+		// 与 timeout 的区别是硬/软:timeout 到点会发 \x03 探测并报错,wait 到点只是"不再等"。
+		Wait int `json:"wait"`
 	}
 	if !readBody(w, r, &req) {
 		return
@@ -672,8 +877,36 @@ func (s *Server) hRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lower := strings.ToLower(cmd)
-	if lower == "quit" || lower == "run" || strings.HasPrefix(lower, "run ") {
-		fail(w, 400, fmt.Errorf("请使用会话控制接口执行 quit/run"))
+	if lower == "quit" || strings.HasPrefix(lower, "quit ") {
+		fail(w, 400, fmt.Errorf("请使用会话控制接口执行 quit"))
+		return
+	}
+	// 闸门放在入参与合法性校验之后:被拒的命令不该在时间线上留痕
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
+		return
+	}
+	// run / 入口停站时的 continue 有会话级语义,不能当裸命令透传:
+	// fgldb 在 run 之前不接受 continue(会回 "The program is not being run"),
+	// 而会话层的 Run()/Continue() 对这个状态有兜底(Continue 等效成 Run)。
+	// 不分流的话**协作模式会死锁**:人按不了「继续」(模式闸门),AI 又发不出 run,
+	// 谁都启动不了程序。Web 界面走的是 /control,两边落到同一实现。
+	if lower == "run" || (lower == "continue" && !sess.Started()) {
+		var er error
+		if lower == "run" {
+			_, er = sess.Run()
+		} else {
+			_, er = sess.Continue()
+		}
+		if er != nil {
+			fail(w, 400, er)
+			return
+		}
+		writeJSON(w, 200, map[string]any{
+			"ok": true, "lines": []string{cmd},
+			"state": string(sess.State()), "started": sess.Started(),
+			"hint": "程序已放行,用 tdebug wait --for stopped 等它停下来",
+		})
 		return
 	}
 	timeout := req.Timeout
@@ -683,15 +916,195 @@ func (s *Server) hRaw(w http.ResponseWriter, r *http.Request) {
 	if timeout > 600 {
 		timeout = 600
 	}
-	lines, err := sess.Raw(cmd, time.Duration(timeout)*time.Second)
+	soft := time.Duration(req.Wait) * time.Second
+	if soft < 0 {
+		soft = 0
+	}
+	// 软等待必须短于硬超时,否则永远轮不到它
+	if soft > 0 && soft >= time.Duration(timeout)*time.Second {
+		soft = time.Duration(timeout-1) * time.Second
+	}
+	res, err := sess.RawSoft(cmd, time.Duration(timeout)*time.Second, soft)
 	if err != nil {
 		fail(w, 400, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "lines": lines})
+	// 断点类裸命令:命令本身已经执行完了,但会话的断点缓存还没跟上 —— 见 IsBreakpointCmd
+	// 的注释。/raw 走的 kind 是 "other",onLine 里那条按 kind 分派的解析不会进,
+	// 所以必须在这里用 info breakpoints 回灌一次,否则这个断点在快照/持久化里都不存在。
+	act := "raw"
+	if IsBreakpointCmd(cmd) {
+		sess.syncBreakpoints()
+		act = "bp." + strings.ToLower(strings.Fields(cmd)[0])
+	}
+	s.emitAction(r, sess, act, cmd)
+	resp := map[string]any{"ok": true, "lines": res.Lines}
+	if res.SoftTimeout {
+		// 不是错误:命令仍在飞,程序仍在跑
+		resp["softTimeout"] = true
+		resp["state"] = string(sess.State())
+		resp["silentSeconds"] = sess.SilentSeconds()
+		resp["hint"] = "程序仍在运行:命令没有被取消,也没有发 SIGINT。" +
+			"用 tdebug wait 等停站(或 POST /api/sessions/{id}/wait)," +
+			"用 tdebug why 判断它在等用户还是在空转"
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---------- 上下文查询 ----------
+
+// hWhy 探测「程序此刻到底在干什么」——在等用户操作,还是在空转。
+// 把 SKILL.md 里教 AI 人肉做的三步(interrupt → where → 看停在哪一行)收成一次调用。
+// 已停站时只做分类,不发任何命令(零副作用);运行中才发 SIGINT。
+// body: {"resume": true} —— 默认 true(探测完自动放回运行,免得把等用户的程序挂住)。
+//
+// 闸门上是**条件写**:只有运行中(会发 SIGINT)才受模式闸门约束;已停站时纯粹是
+// 只读分类,放行给任一方 —— 否则人在协作模式下连"现在什么情况"都问不了。
+func (s *Server) hWhy(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Resume *bool `json:"resume"`
+	}
+	if !readBody(w, r, &req) {
+		return
+	}
+	sess := s.sessOf(w, r)
+	if sess == nil {
+		return
+	}
+	if sess.State() == StateRunning {
+		if sess = s.sessOfWrite(w, r); sess == nil {
+			return
+		}
+	}
+	resume := true
+	if req.Resume != nil {
+		resume = *req.Resume
+	}
+	res, err := sess.Why(resume)
+	if err != nil {
+		fail(w, 409, err)
+		return
+	}
+	s.emitAction(r, sess, "why", "探测程序在等用户还是空转")
+	writeJSON(w, 200, map[string]any{"ok": true, "why": res})
+}
+
+// hWait 长轮询:阻塞到会话出现指定事件或超时。
+// GET /api/sessions/{id}/wait?for=stopped,exit,dead,watchdog&timeout=300
+//
+// 手法是「先订阅、后判现状」:订阅动作与读快照之间的窗口由快照本身补齐 ——
+// 谓词只看权威现状(State()/Cur()),不看事件历史,所以历史丢失无关紧要,
+// **hWait 因此不依赖单调序号**。(Event.Seq 是为 WS 开场补发与前端去重的
+// **游标**语义引入的,与此处的**栅栏**判断互不冲突。)
+// **超时不是错误**:返回 200 + timedOut:true + 当前快照。
+func (s *Server) hWait(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessOf(w, r)
+	if sess == nil {
+		return
+	}
+	want := map[string]bool{}
+	for _, t := range strings.Split(r.URL.Query().Get("for"), ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			want[t] = true
+		}
+	}
+	if len(want) == 0 {
+		for _, t := range []string{"stopped", "exit", "dead", "watchdog"} {
+			want[t] = true
+		}
+	}
+	to := 300 * time.Second
+	if v := r.URL.Query().Get("timeout"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			to = time.Duration(n) * time.Second
+		}
+	}
+	if to > time.Hour {
+		to = time.Hour
+	}
+
+	// 先订阅,后判现状:反向顺序会漏掉"订阅建立前刚发生"的事件
+	ch, cancel := s.mgr.Subscribe("wait")
+	defer cancel() // 必须 defer,否则 m.subs 泄漏
+
+	if ev, ok := waitNow(sess, want); ok {
+		writeJSON(w, 200, waitResp(sess, ev, false))
+		return
+	}
+
+	timer := time.NewTimer(to)
+	defer timer.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return // 客户端断开:不写响应
+		case ev := <-ch:
+			if ev.SessionID != "" && ev.SessionID != sess.ID {
+				continue // 别条会话的事件
+			}
+			if waitMatch(ev, want) {
+				writeJSON(w, 200, waitResp(sess, &ev, false))
+				return
+			}
+		case <-timer.C:
+			writeJSON(w, 200, waitResp(sess, nil, true))
+			return
+		}
+	}
+}
+
+// waitMatch 事件是否命中等待条件。
+// **注意**:stopped / exit / idle 在事件流里也可能是 `state` 事件的取值,不是独立类型 ——
+// 尤其**入口停站只发 `state(stopped)`,不发 `stopped` 事件**(见 startRun),
+// 不做这个映射就会漏掉它,tdebug start 会一直等到超时。
+func waitMatch(ev Event, want map[string]bool) bool {
+	if want[ev.Type] {
+		return true
+	}
+	if ev.Type == "state" && ev.State != "" {
+		if want[ev.State] {
+			return true
+		}
+		if (ev.State == string(StateExit) || ev.State == string(StateIdle)) && (want["exit"] || want["dead"]) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitNow 把"权威现状"映射成一条合成事件;不满足等待条件时返回 false。
+func waitNow(sess *Session, want map[string]bool) (*Event, bool) {
+	switch sess.State() {
+	case StateStopped:
+		if want["stopped"] {
+			st := sess.Cur()
+			return &Event{Type: "stopped", SessionID: sess.ID, Stop: &st}, true
+		}
+	case StateExit, StateIdle:
+		if want["exit"] || want["dead"] {
+			return &Event{Type: "exit", SessionID: sess.ID}, true
+		}
+	}
+	return nil, false
+}
+
+func waitResp(sess *Session, ev *Event, timedOut bool) map[string]any {
+	resp := map[string]any{
+		"ok":            true,
+		"state":         string(sess.State()),
+		"silentSeconds": sess.SilentSeconds(),
+	}
+	if timedOut {
+		resp["timedOut"] = true
+	}
+	if ev != nil {
+		resp["event"] = ev
+		if ev.Stop != nil {
+			resp["stop"] = ev.Stop
+		}
+	}
+	return resp
+}
 
 func (s *Server) hLocals(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessOf(w, r)
@@ -749,7 +1162,7 @@ func (s *Server) hLocate(w http.ResponseWriter, r *http.Request) {
 // hCalibrate 行号校准:停站后检测 fgldb(DVM)行号与磁盘源码的偏移量,
 // 供前端把 Monaco 行号对齐到协议流。POST /api/sessions/{id}/calibrate
 func (s *Server) hCalibrate(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
+	sess := s.sessOfWrite(w, r)
 	if sess == nil {
 		return
 	}
@@ -759,6 +1172,7 @@ func (s *Server) hCalibrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[calibrate] session=%s offset=%d", sess.ID, offset)
+	s.emitAction(r, sess, "session.calibrate", fmt.Sprintf("行号校准(偏移 %d)", offset))
 	writeJSON(w, 200, map[string]any{"ok": true, "offset": offset})
 }
 
@@ -800,43 +1214,45 @@ func (s *Server) hAutovars(w http.ResponseWriter, r *http.Request) {
 // hAutovarsSet POST /api/sessions/{id}/autovars {auto}:开关停站后自动求值自动变量
 // (默认关;开启且已停站时立即补一次求值,结果照常以 autovars 事件推送)
 func (s *Server) hAutovarsSet(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	var req struct {
 		Auto *bool `json:"auto"`
 	}
 	if !readBody(w, r, &req) || req.Auto == nil {
 		return
 	}
+	verb := "关闭"
+	if *req.Auto {
+		verb = "开启"
+	}
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
+		return
+	}
 	sess.SetAutovarsOn(*req.Auto)
+	s.emitAction(r, sess, "session.autovars", verb+"自动变量求值")
 	writeJSON(w, 200, map[string]any{"ok": true, "auto": *req.Auto})
 }
 
 func (s *Server) hFrame(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	var req struct {
 		Num int `json:"num"`
 	}
 	if !readBody(w, r, &req) {
 		return
 	}
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
+		return
+	}
 	if err := sess.Frame(req.Num); err != nil {
 		fail(w, 400, err)
 		return
 	}
+	s.emitAction(r, sess, "session.frame", fmt.Sprintf("选帧 #%d", sess.CurFrame()))
 	writeJSON(w, 200, map[string]any{"ok": true, "frame": sess.CurFrame()})
 }
 
 func (s *Server) hBPEnabled(w http.ResponseWriter, r *http.Request) {
-	sess := s.sessOf(w, r)
-	if sess == nil {
-		return
-	}
 	num, err := strconv.Atoi(r.PathValue("num"))
 	if err != nil {
 		fail(w, 400, fmt.Errorf("断点编号无效"))
@@ -848,10 +1264,19 @@ func (s *Server) hBPEnabled(w http.ResponseWriter, r *http.Request) {
 	if !readBody(w, r, &req) || req.Enabled == nil {
 		return
 	}
+	verb := "停用"
+	if *req.Enabled {
+		verb = "启用"
+	}
+	sess := s.sessOfWrite(w, r)
+	if sess == nil {
+		return
+	}
 	if err := sess.SetBPEnabled(num, *req.Enabled); err != nil {
 		fail(w, 400, err)
 		return
 	}
+	s.emitAction(r, sess, "bp.enable", fmt.Sprintf("%s断点 %d", verb, num))
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -955,9 +1380,11 @@ func (s *Server) hWSLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	items, hasMore, err := listWSLogs(conn, dbc, WSLogFilter{
 		Service:   q.Get("service"),
+		Job:       q.Get("job"),
 		Result:    q.Get("result"),
 		Origin:    q.Get("origin"),
 		Server:    q.Get("server"),
+		PID:       q.Get("pid"),
 		OnlyFail:  q.Get("onlyFail") == "1",
 		StartFrom: q.Get("startFrom"),
 		EndTo:     q.Get("endTo"),
@@ -1008,6 +1435,9 @@ func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
+	if !s.sessOfWriteGlobal(w, r) {
+		return
+	}
 	conn, err := host.Dial(s.cfg.SSH)
 	if err != nil {
 		fail(w, 500, fmt.Errorf("SSH 连接失败: %w", err))
@@ -1043,6 +1473,9 @@ func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, err)
 		return
 	}
+	// 模式与 hLaunch 同规则:谁发起谁驾驶。重放同样是 AI 从 CLI 发起的,
+	// 漏掉这一句会让 AI 连自己刚启动的会话都写不了(quit 都会被 403 拦下)。
+	sess.SetMode(launchModeFor(r))
 	go func() {
 		if err := sess.Launch(r.Context()); err != nil {
 			s.mgr.emit(Event{Type: "log", SessionID: sess.ID, Text: "启动失败: " + err.Error()})
@@ -1056,6 +1489,7 @@ func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+	s.emitAction(r, sess, "session.replay", "按接口日志重放调试")
 	writeJSON(w, 200, map[string]any{"ok": true, "sessionId": sess.ID,
 		"module": sess.Module, "prog": sess.Prog, "runProg": sess.RunProg})
 }
@@ -1185,26 +1619,66 @@ func (s *Server) hConnTest(w http.ResponseWriter, r *http.Request) {
 
 // ---------- WebSocket ----------
 
+// wsReplayLimit WS 建连时补发多少条历史(对齐前端时间线的容量)
+const wsReplayLimit = 500
+
+// replayTypes 只补发"时间线类"事件:state/dead 由页面自己的快照拉取与状态同步负责,
+// 混进补发批次反而可能让前端拿旧状态覆盖新状态。
+var replayTypes = map[string]bool{"stopped": true, "ai_action": true, "log": true, "watchdog": true}
+
 func (s *Server) hWS(w http.ResponseWriter, r *http.Request) {
-	ch, cancel := s.mgr.Subscribe("ws")
+	ch, replay, cancel := s.mgr.SubscribeWithReplay("ws", wsReplayLimit)
 	defer cancel()
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	ctx := r.Context()
+	// ctx 与连接同生命周期:下面那个丢弃式 reader 一旦读到错误就取消它。
+	ctx, cancelConn := context.WithCancel(r.Context())
+	defer cancelConn()
+
+	// 必须有人读:否则库处理不了对端的 close/ping 帧 —— 客户端关闭时服务端要干等到
+	// 超时才发现,代理上的 ping 也得不到回应(这条通道是纯推送,收到的都丢掉)。
+	go func() {
+		defer cancelConn()
+		for {
+			if _, _, err := conn.Read(ctx); err != nil {
+				return
+			}
+		}
+	}()
+
+	writeFrame := func(v any) error {
+		data, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		wctx, wcancel := context.WithTimeout(ctx, 5*time.Second)
+		defer wcancel()
+		return conn.Write(wctx, websocket.MessageText, data)
+	}
+
+	// 开场补发:页面刷新后时间线不该是空的(而"看着 AI 干活时刷新一下"是很自然的动作)。
+	// 前端收到 replay 帧**只追加时间线、不触发任何副作用**,页面状态另有 refreshSnapshot 负责。
+	kept := replay[:0]
+	for _, ev := range replay {
+		if replayTypes[ev.Type] {
+			kept = append(kept, ev)
+		}
+	}
+	if err := writeFrame(map[string]any{"type": "replay", "epoch": s.mgr.Epoch, "events": kept}); err != nil {
+		return
+	}
+	// hello 哨兵:带 epoch,前端据此判断服务端是否重启过(重启则序号归零,要重置去重游标)
+	if err := writeFrame(map[string]any{"type": "hello", "epoch": s.mgr.Epoch}); err != nil {
+		return
+	}
+
 	for {
 		select {
 		case ev := <-ch:
-			data, err := json.Marshal(ev)
-			if err != nil {
-				continue
-			}
-			wctx, wcancel := context.WithTimeout(ctx, 5*time.Second)
-			err = conn.Write(wctx, websocket.MessageText, data)
-			wcancel()
-			if err != nil {
+			if err := writeFrame(ev); err != nil {
 				return
 			}
 		case <-ctx.Done():

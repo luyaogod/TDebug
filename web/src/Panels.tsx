@@ -21,6 +21,8 @@ function LaunchSection() {
   const state = useStore((s) => s.state)
   const sessionEnv = useStore((s) => s.sessionEnv)
   const calibrate = useStore((s) => s.calibrate)
+  // 协作模式下启动/校准归 AI(你选的边界)
+  const collab = useStore((s) => s.mode) === 'collab'
   const [v, setV] = useState(() => localStorage.getItem('tdebug.launchTarget') || 'bsft001_wf')
   const doLaunch = () => {
     const t = v.trim()
@@ -44,8 +46,8 @@ function LaunchSection() {
             {prog || (state === 'loading' ? '连接中…' : sessionEnv || '会话')}
           </span>
           <button
-            title={state === 'stopped' ? '行号校准:协议行号与源码错位时点击对齐' : '行号校准(需停站后点击)'}
-            disabled={state !== 'stopped'}
+            title={collab ? '协作模式:行号校准由 AI 负责' : (state === 'stopped' ? '行号校准:协议行号与源码错位时点击对齐' : '行号校准(需停站后点击)')}
+            disabled={collab || state !== 'stopped'}
             onClick={() => void calibrate()}
             className="p-1 transition-colors hover:bg-accent/60 disabled:pointer-events-none disabled:opacity-30"
           >
@@ -167,6 +169,8 @@ export function RightPanels() {
   const autovarsAuto = useStore((s) => s.autovarsAuto)
   const toggleStackAuto = useStore((s) => s.toggleStackAuto)
   const toggleAutovarsAuto = useStore((s) => s.toggleAutovarsAuto)
+  // 协作模式下自动变量开关归 AI(它会在后台逐条发 print,占命令槽)
+  const collab = useStore((s) => s.mode) === 'collab'
   // 手风琴开合(受控):默认只展开「变量监视/断点」;调用栈/自动变量随自动开关
   // 联动——开则展开(数据开始自动刷新),关(默认)则收起,需要时手动点开看存量
   const [open, setOpen] = useState<string[]>(() => {
@@ -199,9 +203,9 @@ export function RightPanels() {
         </AccordionItem>
 
         <AccordionItem value="autovars">
-          <PanelHeader leading={<AutoSwitch on={autovarsAuto} onToggle={() => toggleAutovarsAuto()}
+          <PanelHeader leading={<AutoSwitch on={collab || autovarsAuto} onToggle={() => { if (!collab) toggleAutovarsAuto() }}
             onTip="自动求值已开启:每次停站求值源码窗变量并刷新本面板(点击关闭,减少自动调度卡顿)"
-            offTip="自动求值已关闭(默认):停站后不再求值自动变量;点击开启" />}>
+            offTip={collab ? '协作模式:自动求值开关由 AI 负责' : '自动求值已关闭(默认):停站后不再求值自动变量;点击开启'} />}>
             <AutovarsTitle />
           </PanelHeader>
           <AccordionContent>
@@ -260,17 +264,21 @@ function StackBody() {
   const selected = useStore((s) => s.selectedFrame)
   const selectFrame = useStore((s) => s.selectFrame)
   const stopped = useStore((s) => s.state === 'stopped')
+  // 协作模式下选帧归 AI(你选的边界:只保留悬浮取值/变量/调用栈/协议流)。
+  // 后果是只能看栈顶帧的变量 —— 要深入看外层帧,请在对话里让 AI 切帧。
+  const collab = useStore((s) => s.mode) === 'collab'
+  const canPick = stopped && !collab
   if (frames.length === 0) return null
   return (
     <div>
       {frames.map((f) => (
         <div
           key={f.idx}
-          className={`cursor-pointer border-b border-border/60 px-2 py-1 text-xs hover:bg-accent/40 ${
+          className={`border-b border-border/60 px-2 py-1 text-xs ${canPick ? 'cursor-pointer hover:bg-accent/40' : ''} ${
             selected === f.idx ? 'bg-sky-500/10' : ''
-          } ${!stopped ? 'opacity-60' : ''}`}
-          title={stopped ? `点击切到该帧上下文(print/locals 随之切换)` : '停站后可切换栈帧'}
-          onClick={() => stopped && void selectFrame(f.idx)}
+          } ${!canPick ? 'opacity-60' : ''}`}
+          title={collab ? '协作模式:选帧由 AI 负责,请在对话里委托' : (stopped ? `点击切到该帧上下文(print/locals 随之切换)` : '停站后可切换栈帧')}
+          onClick={() => canPick && void selectFrame(f.idx)}
         >
           <span className="mr-1.5 text-muted-foreground">#{f.idx}</span>
           <span className="text-sky-600 dark:text-sky-400">{f.func}</span>
@@ -443,8 +451,10 @@ export function TimelinePanel() {
   const kindTone: Record<string, string> = {
     stop: 'text-yellow-600 dark:text-yellow-400', warn: 'text-red-600 dark:text-red-400', command: 'text-sky-600 dark:text-sky-400', info: 'text-muted-foreground',
   }
-  // fgldb 命令直通输入(复刻原版 fgldeb Ctrl+D 子画面);仅停站时可发
-  const canSend = !!sessionId && state === 'stopped'
+  // fgldb 命令直通输入(复刻原版 fgldeb Ctrl+D 子画面);仅停站时可发。
+  // 协作模式下命令归 AI(服务端会 403)—— 界面不给入口,要看什么请在对话里委托。
+  const collab = useStore((s) => s.mode) === 'collab'
+  const canSend = !!sessionId && state === 'stopped' && !collab
   const submit = () => {
     const c = cmd.trim()
     if (!c || !canSend) return
@@ -514,7 +524,7 @@ export function TimelinePanel() {
             onChange={(e) => setCmd(e.target.value)}
             onKeyDown={onCmdKey}
             disabled={!canSend}
-            placeholder={canSend ? 'fgldb 命令,如 print lp_str / info breakpoints(↑↓ 历史),回车发送' : '需停站后才能发送命令'}
+            placeholder={collab ? '协作模式:命令由 AI 执行,请在对话里委托给 AI' : (canSend ? 'fgldb 命令,如 print lp_str / info breakpoints(↑↓ 历史),回车发送' : '需停站后才能发送命令')}
             className="h-6 min-w-0 flex-1 bg-transparent font-mono text-xs text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
           />
         </div>

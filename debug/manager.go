@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"tdebug/host"
 	"time"
+
+	"github.com/pkg/sftp"
 )
 
 // Manager 调试会话管理器:持有会话、向订阅者(WS/MCP)广播事件、保留最近事件供查询
@@ -24,9 +28,20 @@ type Manager struct {
 	evMu sync.Mutex
 	evs  []Event
 
+	// seq 事件单调序号。用原子而非在 evMu 里自增:output 事件也要有序号
+	// (前端统一按序号去重),而 output 不入缓冲、根本不进 evMu。
+	// 序号是进程级的、重启归零,所以配一个 Epoch 让前端知道该重置游标。
+	seq   atomic.Uint64
+	Epoch string
+
 	// T100 动态环境缓存(登录区域 → 路径),TTL 5 分钟;探针失败不缓存
 	envMu    sync.Mutex
 	envCache map[string]cachedEnv
+
+	// 会话外源码读取共用的连接(见 srcmirror.go):
+	// 每次 tdebug source/grep 重新握手太贵,按 SSH 目标缓存一条长连接。
+	srcMu sync.Mutex
+	src   *srcConn
 }
 
 // maxBufferedEvents 环形缓冲上限。
@@ -43,6 +58,7 @@ func NewManager(cfg *Config) *Manager {
 		sessions: map[string]*Session{},
 		subs:     map[chan Event]string{},
 		envCache: map[string]cachedEnv{},
+		Epoch:    strconv.FormatInt(time.Now().UnixNano(), 36),
 	}
 }
 
@@ -98,8 +114,39 @@ func (m *Manager) Subscribe(tag string) (<-chan Event, func()) {
 	}
 }
 
+// SubscribeWithReplay 订阅事件流,同时取回最近 n 条历史(供 WS 建连时开场补发)。
+//
+// 订阅与取快照放进**同一个 evMu→subMu 临界区**(锁序与 emit 一致):
+// 这样保证**不遗漏** —— emit 的 append 先于 broadcast,窗口内产生的事件
+// 要么已经进了快照、要么会进 channel。但**仍可能重复**(emit 的 append 与
+// broadcast 之间不持锁),所以调用方必须用 Seq 去重。
+func (m *Manager) SubscribeWithReplay(tag string, n int) (<-chan Event, []Event, func()) {
+	ch := make(chan Event, 4096)
+	m.evMu.Lock()
+	m.subMu.Lock()
+	m.subs[ch] = tag
+	m.subMu.Unlock()
+	var replay []Event
+	if n > 0 && len(m.evs) > 0 {
+		start := len(m.evs) - n
+		if start < 0 {
+			start = 0
+		}
+		replay = make([]Event, len(m.evs)-start)
+		copy(replay, m.evs[start:])
+	}
+	m.evMu.Unlock()
+	cancel := func() {
+		m.subMu.Lock()
+		delete(m.subs, ch)
+		m.subMu.Unlock()
+	}
+	return ch, replay, cancel
+}
+
 // emit 会话事件回调:入环形缓冲并广播给所有订阅者(非阻塞,满则丢弃)
 func (m *Manager) emit(ev Event) {
+	ev.Seq = m.seq.Add(1) // 第一件事:序号必须先于任何入缓冲/广播动作
 	// 只保留对"发生了什么"有信息量的结构化事件(输出流/自动变量列表不入缓冲,
 	// 会占用大量内存且 AI 用 tail 查询时噪声过大)
 	switch ev.Type {
@@ -163,6 +210,13 @@ func (m *Manager) launchWith(cfg *Config, module, prog string) (*Session, error)
 	if err != nil {
 		return nil, err
 	}
+	// 新的一轮运行:清空上一轮攒下的源码副本(见 srcmirror.go)。
+	// 放在 prepareSession 成功之后 —— 它可能因"已有活跃运行"而拒绝,
+	// 那种失败不该顺手毁掉正在跑的那一轮的副本。
+	// 两件事必须成对:清了目录还要清会话的"已镜像"记录,否则复用的宿主会话
+	// 会以为文件早就镜像过,新一轮再也落不下副本。
+	clearMirror(cfg.DataDir)
+	sess.resetMirrored()
 	if runProg != "" && runProg != prog {
 		sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("作业编号 %s → 实体程序 %s(gzzz_t)", prog, runProg)})
 	}
@@ -316,6 +370,10 @@ func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent, reqOverri
 	if err != nil {
 		return nil, err
 	}
+	// 新的一轮运行:清空上一轮攒下的源码副本(见 srcmirror.go);
+	// "已镜像"记录必须跟着一起清(复用的宿主会话会把它带进下一轮)。
+	clearMirror(m.cfg.DataDir)
+	sess.resetMirrored()
 	if runProg != "" && runProg != job {
 		sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放调试:作业 %s → 实体程序 %s(gzzz_t)", job, runProg)})
 	}
@@ -366,6 +424,17 @@ type SessionBrief struct {
 	Holding  float64 `json:"holdingSeconds"`
 	Breaks   int     `json:"breakpoints"`
 	Watchdog int     `json:"watchdogSeconds"`
+	// 停站现场就是交互语句(INPUT/MENU/DISPLAY ARRAY…):程序把控制权交给了界面。
+	// 零成本判定(只看停站那一行的源码文本),供 AI 直接分支,不必再读源码做预测。
+	WaitingForUser bool   `json:"waitingForUser,omitempty"`
+	WaitingKind    string `json:"waitingKind,omitempty"`
+	// SilentSeconds:运行态下距最近一次协议输出的秒数 —— 判断"跑了很久却毫无动静"
+	// (可能就是停在界面上等用户,也可能是慢查询)。停站态为 0。
+	SilentSeconds float64 `json:"silentSeconds,omitempty"`
+	// Mode 谁在驾驶:solo(纯人工)| collab(协作,AI 主导)
+	Mode string `json:"mode"`
+	// Inflight 正在执行的那条命令(空闲为 nil)—— 界面上"AI 正在执行 continue(已 12s)"
+	Inflight *InflightInfo `json:"inflight,omitempty"`
 }
 
 func (m *Manager) Snapshot() []SessionBrief {
@@ -378,9 +447,14 @@ func (m *Manager) Snapshot() []SessionBrief {
 			ID: s.ID, Module: s.Module, Prog: s.Prog, RunProg: s.RunProg,
 			State: string(s.State()), Env: s.EnvName(), Started: s.Started(), File: cur.File, Line: cur.Line,
 			Func: cur.Func, Reason: cur.Reason,
-			Holding:  s.HoldingSeconds(),
-			Breaks:   len(s.Breakpoints()),
-			Watchdog: m.cfg.WatchdogSeconds,
+			Holding:        s.HoldingSeconds(),
+			Breaks:         len(s.Breakpoints()),
+			Watchdog:       m.cfg.WatchdogSeconds,
+			WaitingForUser: cur.WaitingForUser,
+			WaitingKind:    cur.WaitingKind,
+			SilentSeconds:  s.SilentSeconds(),
+			Mode:           s.Mode(),
+			Inflight:       s.Inflight(),
 		})
 	}
 	return out
@@ -413,46 +487,45 @@ func (m *Manager) CreateSessionOn(cfg *Config) (*Session, error) {
 	return sess, nil
 }
 
-// SourcePreview 会话建立前预取源码:用独立短连接读母版,消除前端启动期空白。
+// SourcePreview 会话建立前预取源码:读母版消除前端启动期空白,顺带落本地镜像。
 // module 为空(留待会话内自动解析)时直接跳过。
 func (m *Manager) SourcePreview(module, prog string) (*SourceFile, error) {
 	if module == "" {
 		return nil, fmt.Errorf("module 为空,跳过源码预取")
 	}
-	conn, err := host.Dial(m.cfg.SSH)
-	if err != nil {
-		return nil, fmt.Errorf("SSH 连接失败: %w", err)
-	}
-	defer conn.Close()
-	// 动态路径(登录区域 → 环境脚本):探针+缓存;失败即报错(无静态配置可回退)
-	if err := m.ensureRuntimeEnv(conn); err != nil {
-		return nil, err
-	}
-	cl, err := conn.SFTP()
-	if err != nil {
-		return nil, err
-	}
 	dvmFile := module + "_" + prog + ".4gl"
-	var lastErr error
-	for _, p := range sourceCandidatePaths(m.cfg.ModuleRootsActual(), module, dvmFile) {
-		f, err := cl.Open(p)
-		if err != nil {
-			lastErr = err
-			continue
+	var out *SourceFile
+	err := m.withSrcConn(func(_ *host.SSHConn, cl *sftp.Client) error {
+		var lastErr error
+		for _, p := range sourceCandidatePaths(m.cfg.ModuleRootsActual(), module, dvmFile) {
+			f, err := cl.Open(p)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			var mt time.Time
+			if fi, err := f.Stat(); err == nil {
+				mt = fi.ModTime()
+			}
+			data, err := io.ReadAll(f)
+			f.Close()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			out = &SourceFile{
+				DVMFile: dvmFile, Path: p, Content: string(data), ModTime: mt,
+				LocalPath: writeMirror(m.cfg.DataDir,
+					mirrorEnvSeg(m.cfg.EnvName(), m.cfg.SSH.Host, m.cfg.Zone), p, data),
+			}
+			return nil
 		}
-		var mt time.Time
-		if fi, err := f.Stat(); err == nil {
-			mt = fi.ModTime()
-		}
-		data, err := io.ReadAll(f)
-		f.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return &SourceFile{DVMFile: dvmFile, Path: p, Content: string(data), ModTime: mt}, nil
+		return fmt.Errorf("源码未找到(%s): %w", dvmFile, lastErr)
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("源码未找到(%s): %w", dvmFile, lastErr)
+	return out, nil
 }
 
 // ---------- 会话外只读能力(AI/CLI 信息通道;不经会话,独立短连接,白名单限登录区源码目录) ----------
@@ -468,68 +541,59 @@ type SourceResult struct {
 // maxSourceFileBytes 会话外读取的文件大小上限(源码一般远小于此)。
 const maxSourceFileBytes = 4 << 20
 
-// ReadSourceStandalone 用独立短连接读取登录区源码目录(动态 ERP/COM)内的源码文件。
+// ReadSourceStandalone 读取登录区源码目录(动态 ERP/COM)内的源码文件。
 //   - path 非空:直接按路径读(白名单校验源码目录前缀);
 //   - path 为空:file(如 asf_bsft001_wf.4gl)按 sourceCandidatePaths 候选解析,module 可空(仅查公共目录);
 //   - from/to(1-based):返回行段(from<=0 从头,to<=0 到底),行文本超长截断防注入超长行。
 //
+// 走会话外复用连接(srcmirror.go),顺带把整份源码落本地镜像并在结果里带出 LocalPath。
 // 返回裁剪后的内容与文件总行数。
 func (m *Manager) ReadSourceStandalone(module, file, path string, from, to int) (*SourceResult, error) {
 	if path == "" && file == "" {
 		return nil, fmt.Errorf("需要 file 或 path 参数")
 	}
-	conn, err := host.Dial(m.cfg.SSH)
-	if err != nil {
-		return nil, fmt.Errorf("SSH 连接失败: %w", err)
-	}
-	defer conn.Close()
-	// 动态路径(登录区域 → 环境脚本):探针+缓存;失败即报错(无静态配置可回退)
-	if err := m.ensureRuntimeEnv(conn); err != nil {
-		return nil, err
-	}
-	cl, err := conn.SFTP()
-	if err != nil {
-		return nil, fmt.Errorf("打开 SFTP 失败: %w", err)
-	}
-	roots := m.cfg.ModuleRootsActual()
-
-	readOne := func(p string) ([]byte, time.Time, error) {
-		f, err := cl.Open(p)
-		if err != nil {
-			return nil, time.Time{}, err
-		}
-		defer f.Close()
-		var mt time.Time
-		if fi, err := f.Stat(); err == nil {
-			mt = fi.ModTime()
-		}
-		data, err := io.ReadAll(f)
-		return data, mt, err
-	}
-
-	// 路径白名单:必须在登录区源码目录之内
-	inRoots := func(p string) bool {
-		for _, root := range roots {
-			if strings.HasPrefix(p, root+"/") {
-				return true
-			}
-		}
-		return false
-	}
-
 	var (
 		data []byte
 		mt   time.Time
 	)
-	if path != "" {
-		if !inRoots(path) {
-			return nil, fmt.Errorf("路径不在登录区源码目录内: %s", path)
+	err := m.withSrcConn(func(_ *host.SSHConn, cl *sftp.Client) error {
+		roots := m.cfg.ModuleRootsActual()
+		if len(roots) == 0 {
+			return fmt.Errorf("登录区源码目录未知(环境路径解析失败)")
 		}
-		data, mt, err = readOne(path)
-		if err != nil {
-			return nil, err
+		readOne := func(p string) ([]byte, time.Time, error) {
+			f, err := cl.Open(p)
+			if err != nil {
+				return nil, time.Time{}, err
+			}
+			defer f.Close()
+			var t time.Time
+			if fi, err := f.Stat(); err == nil {
+				t = fi.ModTime()
+			}
+			d, err := io.ReadAll(f)
+			return d, t, err
 		}
-	} else {
+		// 路径白名单:必须在登录区源码目录之内
+		inRoots := func(p string) bool {
+			for _, root := range roots {
+				if strings.HasPrefix(p, root+"/") {
+					return true
+				}
+			}
+			return false
+		}
+		if path != "" {
+			if !inRoots(path) {
+				return fmt.Errorf("路径不在登录区源码目录内: %s", path)
+			}
+			d, t, err := readOne(path)
+			if err != nil {
+				return err
+			}
+			data, mt = d, t
+			return nil
+		}
 		var lastErr error
 		for _, p := range sourceCandidatePaths(roots, module, file) {
 			if !inRoots(p) {
@@ -537,16 +601,19 @@ func (m *Manager) ReadSourceStandalone(module, file, path string, from, to int) 
 			}
 			d, t, e := readOne(p)
 			if e == nil {
-				data, mt = d, t
-				path = p
-				break
+				data, mt, path = d, t, p
+				return nil
 			}
 			lastErr = e
 		}
-		if data == nil {
-			return nil, fmt.Errorf("源码未找到(%s): %v", file, lastErr)
-		}
+		return fmt.Errorf("源码未找到(%s): %v", file, lastErr)
+	})
+	if err != nil {
+		return nil, err
 	}
+	// 镜像落的是**整份**源码(在下面的行段裁剪与大小截断之前),本地副本要能整读
+	mirrorPath := writeMirror(m.cfg.DataDir,
+		mirrorEnvSeg(m.cfg.EnvName(), m.cfg.SSH.Host, m.cfg.Zone), path, data)
 	if len(data) > maxSourceFileBytes {
 		data = data[:maxSourceFileBytes]
 	}
@@ -573,7 +640,7 @@ func (m *Manager) ReadSourceStandalone(module, file, path string, from, to int) 
 		}
 	}
 	res := &SourceResult{
-		SourceFile: SourceFile{DVMFile: file, Path: path, ModTime: mt},
+		SourceFile: SourceFile{DVMFile: file, Path: path, ModTime: mt, LocalPath: mirrorPath},
 		From:       from, To: to, All: all,
 	}
 	if from <= all {

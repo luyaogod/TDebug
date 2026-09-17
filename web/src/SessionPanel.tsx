@@ -130,7 +130,9 @@ export function SessionPanel() {
   const [topentCfg, setTopentCfg] = useState('')
   const [topentSaved, setTopentSaved] = useState(false)
   const [topentErr, setTopentErr] = useState('')
-  const canSetTopent = !!sessionId && state === 'idle' && !busy
+  // 协作模式下 TOPENT 归 AI(它会改会话的企业编号,直接影响程序连哪个库)
+  const mode = useStore((s) => s.mode)
+  const canSetTopent = !!sessionId && state === 'idle' && !busy && mode !== 'collab'
   // 依赖里必须带 state:会话先建好(sessionId 先到、state=loading),登录与 TOPENT 下发
   // 完成后才有值;只在 sessionId 变化时取会拿到登录前的空值,面板就一直是空的。
   const loadTopent = useCallback(() => {

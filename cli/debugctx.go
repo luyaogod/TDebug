@@ -19,6 +19,7 @@ var (
 	dbgSourceFrom   int
 	dbgSourceTo     int
 	dbgSourcePath   string
+	dbgSourceMeta   bool // source --path-only:只输出定位信息(行数/路径/本地副本),不打正文
 	dbgLogsTail     int
 )
 
@@ -107,8 +108,11 @@ var debugSourceCmd = &cobra.Command{
   --module     模块目录名(帮助定位;可省,仅在公共目录搜索)
   --path       绝对路径(必须在登录区源码目录内,跳过文件名解析)
   --from/--to  只返回 1-based 行段(默认全文;大文件建议限行省上下文)
+  --path-only  只打行数与本地副本路径,不打正文(上千行的文件先定位,再本地读那份副本)
 
-用途:AI 推理需要看函数体/调用链全文时,用它读源码,而不必依赖 list 的 10 行窗口。`,
+每次读取都会把**整份**源码落一份本地副本,并在输出里给出"本地副本"路径 ——
+想看整份文件、或要反复搜同一个文件,直接用那个本地路径读,不必再走 SSH。
+副本只活一轮调试(下次启动调试前清空),免得过期代码误导判断。`,
 	Example: `  tdebug source bsft001_wf.4gl -m asf
   tdebug source --path /u1/topprd/erp/asf/4gl/asf_bsft001_wf.4gl
   tdebug source bsft001_wf.4gl -m asf --from 4400 --to 4600`,
@@ -138,17 +142,28 @@ var debugSourceCmd = &cobra.Command{
 		}
 		var r struct {
 			Source struct {
-				Path    string `json:"path"`
-				From    int    `json:"from"`
-				To      int    `json:"to"`
-				All     int    `json:"all"`
-				Content string `json:"content"`
+				Path      string `json:"path"`
+				LocalPath string `json:"localPath"`
+				From      int    `json:"from"`
+				To        int    `json:"to"`
+				All       int    `json:"all"`
+				Content   string `json:"content"`
 			} `json:"source"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
 			return err
 		}
 		fmt.Printf("== %s (行 %d-%d / 共 %d) ==\n", r.Source.Path, r.Source.From, r.Source.To, r.Source.All)
+		if r.Source.LocalPath != "" {
+			// 顺手落的本地副本:里面是**整份**源码(不只是这一段),
+			// 后续要整读/反复搜就直接用它,不必再走 SSH。
+			fmt.Printf("本地副本: %s\n", r.Source.LocalPath)
+		}
+		if dbgSourceMeta {
+			// 只要定位、不要正文:一个上千行的文件整份打出来会灌爆上下文。
+			// 这个开关让人先拿到行数/路径/本地副本,再用自己的工具去读那份副本。
+			return nil
+		}
 		ln := r.Source.From
 		for _, line := range strings.Split(r.Source.Content, "\n") {
 			fmt.Printf("%6d  %s\n", ln, line)
@@ -326,54 +341,79 @@ var debugInterruptCmd = &cobra.Command{
 	},
 }
 
-// dbgReportStopIfStopped exec 执行后自动回报停站现场(仅当命令可能推进执行且最终停站时打印)。
-func dbgReportStopIfStopped(id, cmd string) error {
+// advancesProgram 该命令是否可能让程序前进到新的停站点
+// (据此决定要不要多发一次查询做现场回报)
+func advancesProgram(cmd string) bool {
 	head := strings.ToLower(strings.TrimSpace(cmd))
 	if i := strings.IndexAny(head, " \t"); i >= 0 {
 		head = head[:i]
 	}
-	// 只对"会使程序前进到停站"的命令做现场回报,避免每条 exec 都多发一次查询
 	switch head {
 	case "step", "next", "continue", "finish", "until", "run", "tbreak", "return", "call":
-	default:
-		return nil
+		return true
 	}
+	return false
+}
+
+// printStopSite 把快照里的停站现场打一行(exec 单条路径与批量共用同一文案)
+func printStopSite(full map[string]any) bool {
+	st, ok := full["stop"].(map[string]any)
+	if !ok {
+		return false
+	}
+	file, _ := st["file"].(string)
+	line := numField(st["line"])
+	fn, _ := st["func"].(string)
+	reason, _ := st["reason"].(string)
+	if file == "" && line == 0 && fn == "" {
+		return false
+	}
+	loc := "?"
+	if file != "" {
+		loc = fmt.Sprintf("%s:%d", file, line)
+	}
+	fmt.Printf("— 已停站 %s (%s)", loc, fn)
+	if reason != "" {
+		fmt.Printf(" reason=%s", reason)
+	}
+	fmt.Println()
+	return true
+}
+
+// dbgFetchStopSite 取一次会话快照,返回会话状态;若此刻正停在某处,顺带把现场打出来。
+// 返回 err 非空表示**这次查询本身失败** —— 调用方要能区分"没确认下来"与"确认没停",
+// 这两种情况在批量里处置相反。
+func dbgFetchStopSite(id string) (string, error) {
 	data, err := dbgAPI("GET", "/api/sessions/"+id, nil)
 	if err != nil {
-		return nil // 回报失败不影响主命令结果
+		return "", err
 	}
 	var s dbgSnapshot
-	if err := json.Unmarshal(data, &s); err != nil || s.State != "stopped" {
+	if err := json.Unmarshal(data, &s); err != nil {
+		return "", err
+	}
+	if s.State == "stopped" {
+		var full map[string]any
+		if err := json.Unmarshal(data, &full); err == nil {
+			printStopSite(full)
+		}
+	}
+	return s.State, nil
+}
+
+// dbgReportStopIfStopped exec 执行后自动回报停站现场(仅当命令可能推进执行且最终停站时打印)。
+func dbgReportStopIfStopped(id, cmd string) error {
+	if !advancesProgram(cmd) {
 		return nil
 	}
-	var full map[string]any
-	if err := json.Unmarshal(data, &full); err != nil {
-		return nil
-	}
-	if st, ok := full["stop"].(map[string]any); ok {
-		file, _ := st["file"].(string)
-		line := numField(st["line"])
-		fn, _ := st["func"].(string)
-		reason, _ := st["reason"].(string)
-		if file == "" && line == 0 && fn == "" {
-			return nil
-		}
-		loc := "?"
-		if file != "" {
-			loc = fmt.Sprintf("%s:%d", file, line)
-		}
-		fmt.Printf("— 已停站 %s (%s)", loc, fn)
-		if reason != "" {
-			fmt.Printf(" reason=%s", reason)
-		}
-		fmt.Println()
-	}
+	_, _ = dbgFetchStopSite(id) // 回报失败不影响主命令结果
 	return nil
 }
 
 func init() {
 	debugSourceCmd.Flags().StringVarP(&dbgSourceModule, "module", "m", "", "模块目录名(帮助定位源码)")
 	debugSourceCmd.Flags().StringVar(&dbgSourcePath, "path", "", "绝对路径读取(须在登录区源码目录内)")
+	debugSourceCmd.Flags().BoolVar(&dbgSourceMeta, "path-only", false, "只输出行数与本地副本路径,不打正文(大文件先定位再本地读)")
 	debugSourceCmd.Flags().IntVar(&dbgSourceFrom, "from", 0, "返回起始行(1-based;0=文件头)")
 	debugSourceCmd.Flags().IntVar(&dbgSourceTo, "to", 0, "返回结束行(1-based;0=文件尾)")
 	debugLogsCmd.Flags().IntVarP(&dbgLogsTail, "tail", "n", 0, "返回最近 N 条(默认 30)")
