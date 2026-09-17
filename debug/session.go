@@ -861,13 +861,24 @@ func (s *Session) pickLaunchDir(prog string) string {
 func (s *Session) entryStopInfo() *StopInfo {
 	si := &StopInfo{Reason: "entry"}
 	mod := s.Module
-	if mod == "" || !reProgName.MatchString(mod) || s.RunProg == "" {
+	// 实体程序(gzzz_t 解析结果)优先;解析不到就退回启动时用的程序名。
+	//
+	// **WS 服务程序(wssp*/awsp*)根本不在 gzzz_t 里**(实测该表 5416 行中 wssp% 命中 0 条),
+	// 所以按作业名启动/重放这类程序时 RunProg 必定为空。以前这里只看 RunProg,于是这类
+	// 会话的入口停站不带文件名 —— 而前端"起好会话、页面再接上来"走的是 syncFromSessions,
+	// 它只在有文件名时才去取源码,结果代码区一片空白(只有行号 1)。
+	// 前端 refreshSource 早就写着 `runProg || prog` 的同样兜底,这里补齐,两边语义一致。
+	prog := s.RunProg
+	if prog == "" {
+		prog = s.Prog
+	}
+	if mod == "" || !reProgName.MatchString(mod) || prog == "" {
 		return si
 	}
 	if s.custModule != "" {
-		si.File = s.custModule + "_" + s.RunProg + ".4gl" // cpm_apmt520_wf.4gl
+		si.File = s.custModule + "_" + prog + ".4gl" // cpm_apmt520_wf.4gl
 	} else {
-		si.File = mod + "_" + s.RunProg + ".4gl" // apm_apmt520_wf.4gl
+		si.File = mod + "_" + prog + ".4gl" // apm_apmt520_wf.4gl
 	}
 	return si
 }

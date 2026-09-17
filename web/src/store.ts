@@ -1088,7 +1088,12 @@ export const useStore = create<Store>((set, get) => ({
       if (s0.state === 'stopped') {
         const snap = await api.snapshot(s0.id)
         set({ stop: snap.stop, breakpoints: snap.breakpoints || [], started: !!snap.started, holdingSeconds: snap.holdingSeconds || 0 })
-        if (snap.stop?.file) void get().refreshSource(snap.stop.file, snap.stop.line)
+        // 有停站就去取源码。入口停站可能不带文件名(WS 服务程序在 gzzz_t 里解析不到
+        // 实体程序),refreshSource 会按「模块_程序.4gl」兜底合成 —— 这是它已有的能力。
+        // 以前这里要求 file 非空才加载,于是"AI 起好会话、页面再接上来"这条唯一的
+        // 接管路径永远空白(只有行号 1);同样兜底的 pollUntilStopped 传的是 undefined,
+        // 两条路径对"要不要加载"的判断不一致。统一成"有停站就加载"。
+        if (snap.stop) void get().refreshSource(snap.stop.file, snap.stop.line)
         if (get().stackAuto) void get().refreshFrames()
         void get().refreshWatches()
         alignAutoPrefs(set, get) // 会话切换/重连后把自动变量开关对齐到新会话
