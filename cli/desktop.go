@@ -59,11 +59,19 @@ var desktopCmd = &cobra.Command{
 			return fmt.Errorf("创建数据目录失败(%s): %w", dir, err)
 		}
 		if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
-			if err := writeDesktopDefaultConfig(cfgPath, desktopListen); err != nil {
-				return err
-			}
-			if !IsJSON() {
-				fmt.Printf("[tdebug] 已创建默认配置: %s\n", cfgPath)
+			// 首启:优先从旧位置迁移(桌面版旧目录 %APPDATA%\TDebug、exe 同目录),
+			// 迁移不到才写默认骨架。壳每次都传 --config,走不到 CLI 的迁移分支,故在此兜住。
+			if src := migrateLegacyConfigTo(cfgPath); src != "" {
+				if !IsJSON() {
+					fmt.Printf("[tdebug] 已迁移配置到 %s (来自 %s)\n", cfgPath, src)
+				}
+			} else {
+				if err := writeDesktopDefaultConfig(cfgPath, desktopListen); err != nil {
+					return err
+				}
+				if !IsJSON() {
+					fmt.Printf("[tdebug] 已创建默认配置: %s\n", cfgPath)
+				}
 			}
 		}
 		cfg, err := debug.LoadConfigAllowEmpty(cfgPath)
@@ -88,6 +96,8 @@ var desktopCmd = &cobra.Command{
 
 // resolveDesktopConfigPath 桌面模式定位配置文件:优先级与 CLI 一致,但**允许文件不存在**
 // (首启由本命令写默认骨架),因此不套 resolveConfigPath 的"必须已存在"校验。
+// 壳显式传了 --config 时以它为准:打包后的 tdebug.exe 位于 resources\ 下,认不到
+// exe 同目录的 .portable 标记,不能退回默认落点(否则便携版会把配置写进用户目录)。
 func resolveDesktopConfigPath() (string, error) {
 	if env := os.Getenv("TDEBUG_CONFIG"); env != "" {
 		return filepath.Abs(env)
@@ -95,7 +105,10 @@ func resolveDesktopConfigPath() (string, error) {
 	if p, err := resolveConfigPath(configPath); err == nil {
 		return p, nil
 	}
-	return filepath.Abs(configPath)
+	if configPath != "" {
+		return filepath.Abs(configPath)
+	}
+	return defaultConfigPath(), nil
 }
 
 // writeDesktopDefaultConfig 写默认配置骨架:默认值统一取 debug.NewDefaultConfig()

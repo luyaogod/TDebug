@@ -105,8 +105,7 @@ func configDir() string {
 	if p, err := resolveConfigPath(configPath); err == nil {
 		return filepath.Dir(p)
 	}
-	abs, _ := filepath.Abs(configPath)
-	return filepath.Dir(abs)
+	return filepath.Dir(defaultConfigPath())
 }
 
 // configDebugListen 读 config.json debug.listen(尽力而为,失败返回空)。

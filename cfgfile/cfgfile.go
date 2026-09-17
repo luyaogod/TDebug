@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // Debug 返回 root 的 "debug" 对象节;缺失或非对象返回统一错误。
@@ -37,10 +38,16 @@ func Open(path string) (map[string]any, error) {
 }
 
 // Save 原子写回:MarshalIndent + 临时文件 + 重命名,失败不留半截文件。
+// 配置目录不存在时自动创建 —— 缺省位置在 %APPDATA%\T100\tdebug\ 下,新机器上首次保存时该目录还没有。
 func Save(path string, root map[string]any) error {
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("创建配置目录失败(%s): %w", dir, err)
+		}
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, out, 0o644); err != nil {

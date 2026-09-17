@@ -23,6 +23,9 @@ config.json
 # 会话数据
 .zcode/
 
+# 技能安装产物(源在 skills/,用 `tdebug install skills --to .claude/skills` 生成)
+/.claude/skills/
+
 # 备份文件
 *.bak
 *~

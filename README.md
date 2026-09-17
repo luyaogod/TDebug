@@ -51,7 +51,8 @@ cd desktop; npm install; npm run dev
 ```
 
 - 数据目录：绿色版（`-portable.zip` 解压后）= **程序所在目录**（与 CLI 便携包布局一致，可共用 config.json，
-  由包内 `.portable` 标记决定）；安装版 = `%APPDATA%\TDebug`。
+  由包内 `.portable` 标记决定）；安装版 = `%APPDATA%\T100\tdebug`（与 CLI 直接调用**同一位置**，
+  桌面版和命令行看到的是同一份配置）。统一位置可用 `T100_HOME` 整体改写。
 - 桌面窗口无原生菜单栏（界面自带工具栏）；`Ctrl+Shift+D` / `Ctrl+Shift+L` 打开配置目录 / 日志，其余快捷键见 desktop/README。
 - 端口：桌面版首启写 `127.0.0.1:28675`（CLI 版 28670），被占用自动顺延，真实地址见 `tdebug status`。
 - 关窗即优雅停止后端；CLI（`status`/`start`/`exec`…）能自动发现并驱动桌面版的会话，反之亦然。
@@ -103,9 +104,10 @@ cd desktop; npm install; npm run dev
 | `wsdebug <rowid>` | 按日志报文参数重放调试，停在入口 |
 | `db [--ent N]` | 数据库连接探查：企业(TOPENT) → 账号映射与连接验证 |
 | `probe` | 协议驱动器自检尖刺：登录→启动→下断点→步进→求值（`-m/-p/-l`） |
-| `install [dir]` | 把 AI 技能（`tdebug-debug.md`）安装到目标项目的 `.claude/skills/` |
+| `install skills` | 把 exe 同目录的 `skills/` 复制到目标目录（`--to <dir>` 换目标、`--force` 覆盖；默认 `<当前目录>/skills`） |
+| `install path` | 把 exe 所在目录加入**用户** PATH（HKCU，不需管理员；`--dry-run` 只预览） |
 
-全局参数：`--config <路径>`（默认 `config.json`）、`--json`、`-v`；
+全局参数：`--config <路径>`（缺省取统一用户目录 `%APPDATA%\T100\tdebug\config.json`，见「config.json」）、`--json`、`-v`；
 控制端命令（start/exec/status/quit/stop/source/logs/locate/resolve/interrupt/env/topent/wslogs/wsdebug）另有 `--url` 覆盖自动发现的地址。
 
 ## config.json
@@ -148,6 +150,7 @@ cd desktop; npm install; npm run dev
 
 | 变量 | 作用 |
 | --- | --- |
+| `T100_HOME` | 改写**统一用户目录**的父目录（缺省 `%APPDATA%\T100`）；TDebug 与 TDictCli 共用，改一处两个工具一起生效 |
 | `TDEBUG_CONFIG` | 覆盖配置文件路径（优先级高于 `--config`） |
 | `TDEBUG_SERVE_LOG` | 后台服务子进程写入的日志路径（由 `serve`/桌面壳自动设置） |
 | `TDBG_RAW=1` | 把 fgldb 协议原始行打到服务日志（排障用） |
@@ -175,7 +178,7 @@ dbconfig/  cfgfile/  erpdb/   数据库连接模型 / config.json 读写 / Oracl
 web/               前端(React 18 + Vite 6 + Monaco + Tailwind v4 + zustand)
 desktop/           Electron 桌面壳(主进程/开发启动器/打包配置/图标/冒烟脚本,见其 README)
 build_portable.bat 纯 CLI 便携包    build_desktop.bat 桌面安装包+免安装包
-.claude/skills/    AI 技能:tdebug-debug.md(tdebug install 可安装到其它项目)
+skills/            AI 技能(每技能一个目录 + SKILL.md;`tdebug install skills` 安装到目标目录)
 ```
 
 ## 注意

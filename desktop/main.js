@@ -9,7 +9,9 @@
 //      失败再兜底 kill;若是接管(attached)别人的实例则不去停它。
 //
 // 数据目录:便携版 = exe 所在目录(electron-builder 注入 PORTABLE_EXECUTABLE_DIR,
-// 与 CLI 便携包"exe + config.json 同目录"一致);安装版 = %APPDATA%\TDebug。
+// 与 CLI 便携包"exe + config.json 同目录"一致);安装版 = %APPDATA%\T100\tdebug
+// —— 与 CLI 直接调用(见 cli/root.go 的 toolsHome/userConfigDir)同一位置,
+// 这样桌面版和命令行看到的是同一份配置。
 // 环境变量:TDEBUG_DESKTOP_DATA 指定数据目录、TDEBUG_BIN 指定后端、TDEBUG_DESKTOP_PORT
 // 覆盖监听地址、TDEBUG_DEV_URL 走开发模式(载入 Vite,不自己拉后端)。
 'use strict'
@@ -35,22 +37,26 @@ let quitting = false
 
 // ---------- 路径 ----------
 
-// 绿色(便携)版判定:程序目录里带 .portable 标记(打包 zip 时放进去),
-// 或那里已经有配置/日志/状态文件(用户删了标记也不会"配置突然不见了")。
+// 绿色(便携)版判定:程序目录里带 .portable 标记(打包 zip 时放进去)。
 // electron-builder 的 portable 目标会注入 PORTABLE_EXECUTABLE_DIR,同样按绿色版处理。
-// 绿色版:配置/日志/断点都放 exe 同目录 —— 与 CLI 便携包(tdebug.exe + config.json)一致,
-// 两种便携包可以共用同一个 config.json。安装版:走 %APPDATA%\TDebug。
+// 绿色版:配置/日志/断点都放 exe 同目录 —— 与 CLI 便携包共用同一套规则(见 cli/root.go)。
+// 非绿色版:统一走 %APPDATA%\T100\tdebug,不再用 electron 的 userData(%APPDATA%\TDebug)。
 function portableRoot() {
   if (process.env.PORTABLE_EXECUTABLE_DIR) return path.resolve(process.env.PORTABLE_EXECUTABLE_DIR)
   if (!app.isPackaged) return '' // 开发态不按绿色版算(那是仓库目录)
   const dir = path.dirname(app.getPath('exe'))
-  const marks = ['.portable', 'config.json', 'logs', '.tdebug-serve.json']
-  return marks.some((m) => fs.existsSync(path.join(dir, m))) ? dir : ''
+  return fs.existsSync(path.join(dir, '.portable')) ? dir : ''
+}
+
+// toolsHome 与 Go 侧 toolsHome() 同规则:T100_HOME 优先,否则 %APPDATA%\T100。
+function toolsHome() {
+  if (process.env.T100_HOME) return path.resolve(process.env.T100_HOME)
+  return path.join(process.env.APPDATA || app.getPath('appData'), 'T100')
 }
 
 function dataDir() {
   if (process.env.TDEBUG_DESKTOP_DATA) return path.resolve(process.env.TDEBUG_DESKTOP_DATA)
-  return portableRoot() || app.getPath('userData')
+  return portableRoot() || path.join(toolsHome(), 'tdebug')
 }
 function configPath() { return path.join(dataDir(), 'config.json') }
 function logPath() { return path.join(dataDir(), 'logs', 'desktop.log') }

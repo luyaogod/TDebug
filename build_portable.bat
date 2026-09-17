@@ -29,7 +29,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [3/4] Copying config.json / README.md ...
+echo [3/4] Copying config.json / README.md / skills ...
 rem 优先打包本地 config.json;没有则用脱敏示例当模板
 set SRC_CFG=config.json
 if not exist "%SRC_CFG%" set SRC_CFG=config.example.json
@@ -41,6 +41,14 @@ if errorlevel 1 (
 )
 copy /y README.md "%STAGE%\" >nul
 copy /y tdebug.exe "%STAGE%\" >nul
+rem AI 技能不再内嵌在 exe 里:以 skills/ 目录随包分发,由 `tdebug install skills` 安装
+xcopy /e /i /y /q skills "%STAGE%\skills" >nul
+if errorlevel 1 (
+    echo COPY SKILLS FAILED
+    exit /b 1
+)
+rem 便携标记:CLI/桌面版据此把配置留在包内而不是写用户目录(见 cli/root.go 的 isPortable)
+type nul > "%STAGE%\.portable"
 
 echo [4/4] Packing zip ...
 python -c "import zipfile, os; root='dist/tdebug-portable'; z=zipfile.ZipFile('dist/tdebug-portable.zip','w',zipfile.ZIP_DEFLATED); [z.write(os.path.join(root,n),'tdebug-portable/'+n) for n in os.listdir(root)]; z.close()" >nul 2>nul
