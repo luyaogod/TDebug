@@ -367,8 +367,9 @@ func dbgExecBatch(id string, cmds []string) error {
 // debugExecCmd 透传任意 fgldb 标准调试命令,原样返回输出。
 // continue/run 等命令会阻塞到程序再次停站(与 fgldb 提示符语义一致)。
 var debugExecCmd = &cobra.Command{
-	Use:   "exec \"<命令>\" [更多命令...]",
-	Short: "透传 fgldb 标准调试命令(print/break/next/where/info/...),可一次多条",
+	SilenceUsage: true, // 报错多为运行期(状态/SSH/库),不是用法问题:别打一大段 usage 误导
+	Use:          "exec \"<命令>\" [更多命令...]",
+	Short:        "透传 fgldb 标准调试命令(print/break/next/where/info/...),可一次多条",
 	Long: `透传 Genero 调试器标准命令,输出为 fgldb 原生文本:
   tdebug exec "break 123"        下断点
   tdebug exec "continue"         继续运行,阻塞到下次停站
@@ -849,8 +850,9 @@ func printTopentContext(snap map[string]any) {
 
 // debugWslogsCmd 获取接口日志列表
 var debugWslogsCmd = &cobra.Command{
-	Use:   "wslogs",
-	Short: "获取接口日志列表(wssp/awsp 报文流水)",
+	SilenceUsage: true, // 报错多为运行期(状态/SSH/库),不是用法问题:别打一大段 usage 误导
+	Use:          "wslogs",
+	Short:        "获取接口日志列表(wssp/awsp 报文流水)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if wsShow != "" {
 			return showWSLog(wsShow, wsJSON, wsSaveReq)
@@ -926,7 +928,13 @@ func showWSLog(rowid string, asJSON bool, reqSave string) error {
 	}
 	note := ""
 	if r.Content.RequestPartial {
-		note = "  ← 不完整:超出读取上限或源文件已清理,不能基于它改入参重放(原样重放不受影响)"
+		// 这里以前写的是"原样重放不受影响" —— 那是错的,而且害人不浅:
+		// 源文件已清理时重放用的就是这段截断文本,JSON 报文会直接崩在解析上。
+		note = "\n     ← 不完整:超出读取上限,或服务器上的源文件已被清理。" +
+			"\n       源文件还在 → 重放直接复用它,不受影响;" +
+			"\n       已清理 → 重放只能用这段截断文本,**JSON 报文会解析失败**" +
+			"\n       (框架先按 JSON 解析,失败后落到 XML 路径),表现是程序一路退出、断点不命中;" +
+			"\n       wsdebug 遇到这种情况会告警。要改入参也只能走 --request-file(拿不到完整原文)。"
 	}
 	fmt.Printf("\n── 请求报文(%d 字符)%s\n%s\n", len(r.Content.Request), note, r.Content.Request)
 	fmt.Printf("\n── 响应报文(%d 字符)\n%s\n", len(r.Content.Response), r.Content.Response)
@@ -935,8 +943,9 @@ func showWSLog(rowid string, asJSON bool, reqSave string) error {
 
 // debugWsdebugCmd 对指定日志发起重放调试
 var debugWsdebugCmd = &cobra.Command{
-	Use:   "wsdebug <rowid>",
-	Short: "按接口日志的报文参数启动重放调试,等到入口停站",
+	SilenceUsage: true, // 报错多为运行期(状态/SSH/库),不是用法问题:别打一大段 usage 误导
+	Use:          "wsdebug <rowid>",
+	Short:        "按接口日志的报文参数启动重放调试,等到入口停站",
 	Long: `取出该日志的请求/响应报文,解析出作业与启动参数,自动重放该次调用并停在入口。
 rowid 从 tdebug wslogs 输出中取。
 
@@ -971,8 +980,14 @@ tdebug topent <企业编号> 改。`,
 		}
 		var r struct {
 			SessionID string `json:"sessionId"`
+			Warn      string `json:"warn"`
 		}
 		_ = json.Unmarshal(data, &r)
+		if r.Warn != "" && !IsJSON() {
+			// 用入库的截断文本重放:后果是"程序一路退出、断点不命中" —— 不说清的话,
+			// 下一件事一定是去查断点为什么没生效
+			fmt.Printf("⚠ %s\n", r.Warn)
+		}
 		snap, err := dbgWaitStopped(r.SessionID, time.Duration(dbgTimeout)*time.Second)
 		if err != nil {
 			return err

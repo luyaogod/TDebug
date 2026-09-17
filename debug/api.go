@@ -1468,7 +1468,7 @@ func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 			s.mgr.Remove(cur.ID)
 		}
 	}
-	sess, err := s.mgr.LaunchReplay(item, content, req.Request)
+	sess, replayWarn, err := s.mgr.LaunchReplay(item, content, req.Request)
 	if err != nil {
 		fail(w, 409, err)
 		return
@@ -1490,8 +1490,10 @@ func (s *Server) hWSLogDebug(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	s.emitAction(r, sess, "session.replay", "按接口日志重放调试")
+	// warn 非空 = 这次重放用的是入库的截断文本,结果可能不可信(见 WriteReplayFiles)。
+	// 随回包一起给出去,让 CLI 能当场说清,而不是等人自己去翻事件日志。
 	writeJSON(w, 200, map[string]any{"ok": true, "sessionId": sess.ID,
-		"module": sess.Module, "prog": sess.Prog, "runProg": sess.RunProg})
+		"module": sess.Module, "prog": sess.Prog, "runProg": sess.RunProg, "warn": replayWarn})
 }
 
 // ---------- 设置(多 SSH / 多数据库) ----------

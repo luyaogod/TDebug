@@ -337,25 +337,26 @@ func (m *Manager) resolveJobWith(cfg *Config, module, job string) (mod, prog, la
 // 报文文件被清理时用 CLOB 内容落到服务器临时文件再重放。
 // 会话复用规则与普通启动一致:同目标空闲宿主直接复用。
 // LaunchReplay 用日志报文重放调试。reqOverride 非空 = 界面里改过的入参(落临时文件后作为 reqPath)。
-func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent, reqOverride string) (*Session, error) {
+// 返回的 warn 非空表示这次重放用的是入库的截断文本,结果可能不可信(见 WriteReplayFiles)。
+func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent, reqOverride string) (*Session, string, error) {
 	job := strings.TrimSpace(item.Job)
 	if job == "" {
-		return nil, fmt.Errorf("该日志没有关联作业编号(wsfa012 为空),无法重放")
+		return nil, "", fmt.Errorf("该日志没有关联作业编号(wsfa012 为空),无法重放")
 	}
 	module, runProg, launchRef, extra := "", "", "", ""
 	if mod2, prog2, ref2, extra2, rerr := m.resolveJob("", job); rerr != nil {
-		return nil, rerr
+		return nil, "", rerr
 	} else if prog2 != "" {
 		module, runProg, launchRef, extra = mod2, prog2, ref2, extra2
 	}
 	conn, err := host.Dial(m.cfg.SSH)
 	if err != nil {
-		return nil, fmt.Errorf("SSH 连接失败: %w", err)
+		return nil, "", fmt.Errorf("SSH 连接失败: %w", err)
 	}
 	defer conn.Close()
-	reqPath, rspPath, err := WriteReplayFiles(conn, item, content, reqOverride)
+	reqPath, rspPath, replayWarn, err := WriteReplayFiles(conn, item, content, reqOverride)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	// 路径进 shell 单引号,剔除单引号防注入。
 	// 对齐 r.dg:报文文件追加在标准参数(BBDL 会话标记等)之后,
@@ -368,12 +369,16 @@ func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent, reqOverri
 	}
 	sess, err := m.prepareSession(m.cfg, module, job, runProg, launchRef, extra, args)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	// 新的一轮运行:清空上一轮攒下的源码副本(见 srcmirror.go);
 	// "已镜像"记录必须跟着一起清(复用的宿主会话会把它带进下一轮)。
 	clearMirror(m.cfg.DataDir)
 	sess.resetMirrored()
+	// 用了入库的截断文本重放:说清楚,别让人把"程序一路退出"当成 bug 去查
+	if replayWarn != "" {
+		sess.emitEvent(Event{Type: "log", Text: "⚠ " + replayWarn})
+	}
 	if runProg != "" && runProg != job {
 		sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放调试:作业 %s → 实体程序 %s(gzzz_t)", job, runProg)})
 	}
@@ -381,7 +386,7 @@ func (m *Manager) LaunchReplay(item *WSLogItem, content *WSLogContent, reqOverri
 		sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放使用界面修改后的入参(%d 字节),已写入 %s", len(reqOverride), reqPath)})
 	}
 	sess.emitEvent(Event{Type: "log", Text: fmt.Sprintf("重放 %s:fglrun -d %s %s", item.Service, runProgOr(job, runProg), args)})
-	return sess, nil
+	return sess, replayWarn, nil
 }
 
 func runProgOr(job, runProg string) string {

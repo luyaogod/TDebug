@@ -279,7 +279,8 @@ func resolveConfigPath(flagPath string) (string, error) {
 func Execute(web fs.FS) {
 	webFS = web
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// cobra 自己已经把错误打到 stderr 了(带 "Error: " 前缀),这里只负责退出码。
+		// 再打一遍就会让同一句话连着出现两次,看着像两个不同的错。
 		os.Exit(1)
 	}
 }

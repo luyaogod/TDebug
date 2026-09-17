@@ -387,26 +387,30 @@ func checkReplayOverride(s string) error {
 }
 
 // WriteReplayFiles 报文文件不存在时,把 CLOB 内容写到服务器临时文件供重放。
-// 返回可用的 (reqPath, rspPath, error);路径来自日志记录或新生成的临时文件。
+// 返回 (请求路径, 响应路径, 告警文案, error);告警非空表示这次重放的结果**可能不可信**。
 // reqOverride 非空 = 界面里改过的入参:无条件落临时文件并优先使用
 // (**不能走 ensure 的"原文件还在就用原文件"分支**,否则用户的修改会被静默忽略)。
-func WriteReplayFiles(conn *host.SSHConn, item *WSLogItem, content *WSLogContent, reqOverride string) (reqPath, rspPath string, err error) {
+//
+// 请求与响应的处置**不对称**,理由见下面两处注释:
+//   - 请求:能复用服务器上的原文件就复用(只读,最忠实);
+//   - 响应:永远写新的临时文件,绝不复用 —— 那是日志的证据。
+func WriteReplayFiles(conn *host.SSHConn, item *WSLogItem, content *WSLogContent, reqOverride string) (reqPath, rspPath, warn string, err error) {
 	if err := checkReplayOverride(reqOverride); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	sftp, err := conn.SFTP()
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer sftp.Close()
-	// 内容落 $TEMPDIR(aws 报文同目录规则)
+	// 内容落 $TEMPDIR(aws 报文同目录规则)。目录只探一次。
+	out, e := conn.Output("bash -lc 'echo $TEMPDIR'", 10*time.Second)
+	tmpDir := strings.TrimSpace(out)
+	if e != nil || tmpDir == "" {
+		tmpDir = "/tmp"
+	}
 	writeTemp := func(text string) (string, error) {
-		out, e := conn.Output("bash -lc 'echo $TEMPDIR'", 10*time.Second)
-		tmp := strings.TrimSpace(out)
-		if e != nil || tmp == "" {
-			tmp = "/tmp"
-		}
-		np := fmt.Sprintf("%s/tdebug_replay_%d.xml", tmp, time.Now().UnixNano()%1000000)
+		np := fmt.Sprintf("%s/tdebug_replay_%d.xml", tmpDir, time.Now().UnixNano()%1000000)
 		nf, e := sftp.Create(np)
 		if e != nil {
 			return "", fmt.Errorf("写重放报文失败: %w", e)
@@ -417,30 +421,45 @@ func WriteReplayFiles(conn *host.SSHConn, item *WSLogItem, content *WSLogContent
 		}
 		return np, nil
 	}
-	ensure := func(path, text string) (string, error) {
+	// 返回是否复用了原文件 —— 调用方据此判断"是不是在用入库文本"
+	ensure := func(path, text string) (string, bool, error) {
 		if path != "" {
 			if f, e := sftp.Open(path); e == nil {
 				f.Close()
-				return path, nil // 文件还在
+				return path, true, nil // 文件还在,复用
 			}
 		}
 		if text == "" {
-			return "", nil
+			return "", false, nil
 		}
-		return writeTemp(text)
+		p, e := writeTemp(text)
+		return p, false, e
 	}
+	reusedReq := false
 	if reqOverride != "" {
 		if reqPath, err = writeTemp(reqOverride); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
-	} else if reqPath, err = ensure(item.ReqPath, content.Request); err != nil {
-		return "", "", err
+	} else if reqPath, reusedReq, err = ensure(item.ReqPath, content.Request); err != nil {
+		return "", "", "", err
 	}
-	if rspPath, err = ensure(item.RspPath, content.Response); err != nil {
-		return "", "", err
+	// 响应**总是**写新的临时文件,绝不复用 item.RspPath:那个路径是这次调用在服务器上的
+	// 原始响应报文,而重放程序会把结果写回它 —— 等于把日志证据抹掉。后来的人(包括 AI)
+	// 再去看这条日志,读到的会是某次重放的产物,而不是当初真实返回的那份,排查方向会被
+	// 整个带偏。请求可以复用(只读),响应不行。
+	if rspPath, err = writeTemp(content.Response); err != nil {
+		return "", "", "", err
 	}
 	if reqPath == "" {
-		return "", "", fmt.Errorf("请求报文不可用(文件已清理且未入库)")
+		return "", "", "", fmt.Errorf("请求报文不可用(文件已清理且未入库)")
 	}
-	return reqPath, rspPath, nil
+	// 请求走了"用入库文本"这条路,而那份文本可能是不完整的(源文件已清理时尤甚)。
+	// 不是错误,但必须让调用方知道:JSON 报文被截断后,框架先按 JSON 解析会失败、再落到
+	// XML 路径,直接崩在 Start tag expected —— 表现为程序一路退出、断点怎么设都不命中。
+	if !reusedReq && content.RequestPartial {
+		warn = fmt.Sprintf("原始请求文件已不在服务器上,这次重放用的是入库的截断文本(%d 字符);"+
+			"报文为 JSON 时框架会解析失败(表现:程序一路退出、断点不命中),结果不可信",
+			len(content.Request))
+	}
+	return reqPath, rspPath, warn, nil
 }

@@ -1205,6 +1205,12 @@ func (s *Session) execOpt(kind, cmd string, mode int, timeout time.Duration, o e
 			if st == StateRunning {
 				return nil, ErrNotStopped
 			}
+			// 空闲/已断开会话:不是"参数写错了",是"这轮已经没有了" —— 别让调用方
+			// 对着 usage 反复改参数(真机上有人这么绕过两回)
+			if st == StateIdle || st == StateExit {
+				return nil, fmt.Errorf("这轮调试已经结束(会话 %s),没有可发命令的停站现场;"+
+					"请重新 tdebug wsdebug <rowid> 或 tdebug start <作业> 起一轮", st)
+			}
 			return nil, fmt.Errorf("当前状态 %s 不可发送命令", st)
 		}
 		if s.pending == nil {
