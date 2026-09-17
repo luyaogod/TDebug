@@ -672,13 +672,19 @@ type wsLogItem struct {
 	ErrMsg   string `json:"errMsg"`
 	Origin   string `json:"origin"`
 	Server   string `json:"server"`
+	// 报文大小(wsfa016/017)。请求那条用来判断存下来的报文完不完整:
+	// 记录大小与存文长度一致 = 完整(见 showWSLog 的标题行)。
+	ReqSize string `json:"reqSize"`
+	RspSize string `json:"rspSize"`
 }
 
 // printWSLogItem 打一行摘要 + 一行 rowid。
 // 每个字段都带标签:服务名 / 作业 / 服务程序是三样东西,靠列位置对齐会让人认错
 // (service 是 oa.schema.data.get 这类长反域名,定宽列一撑就歪)。
 func printWSLogItem(it wsLogItem) {
-	line := fmt.Sprintf("%s  %s  %sms  作业=%s", it.Start, it.Code, it.Duration, it.Job)
+	// wsfa005 处理时间的单位是**秒**(界面那列写的就是「耗时(s)」)。
+	// 这里以前标成 ms:0.42 秒的调用显示成 "0.42434ms",量级差一千倍,会被当成异常。
+	line := fmt.Sprintf("%s  %s  %ss  作业=%s", it.Start, it.Code, it.Duration, it.Job)
 	if it.PID != "" {
 		// 服务程序序号 = 界面上「服务程序」那一列:与 --pid 过滤、以及用户截图里的数字对得上
 		line += "  程序=" + it.PID
@@ -926,17 +932,24 @@ func showWSLog(rowid string, asJSON bool, reqSave string) error {
 		}
 		fmt.Printf("\n请求原文已存到 %s(改完用: tdebug wsdebug %s --request-file %s)\n", reqSave, rowid, reqSave)
 	}
+	// "完不完整"直接判给人看:记录大小(wsfa016)与存文长度一致 = 完整。
+	// 以前只写一句"不完整",没说判据,也没说这条到底是哪种情况 —— 实测有人据此
+	// 差点把一个完好的样本判死(重放明明很忠实)。这里是**逐条**的结论,不是全局状态。
+	verdict := "完整"
+	if r.Item.ReqSize != "" {
+		verdict = fmt.Sprintf("完整,记录大小 %s 字节", r.Item.ReqSize)
+	}
 	note := ""
 	if r.Content.RequestPartial {
+		verdict = fmt.Sprintf("不完整,记录大小 %s 字节,只存下 %d 字符", r.Item.ReqSize, len(r.Content.Request))
 		// 这里以前写的是"原样重放不受影响" —— 那是错的,而且害人不浅:
-		// 源文件已清理时重放用的就是这段截断文本,JSON 报文会直接崩在解析上。
-		note = "\n     ← 不完整:超出读取上限,或服务器上的源文件已被清理。" +
-			"\n       源文件还在 → 重放直接复用它,不受影响;" +
-			"\n       已清理 → 重放只能用这段截断文本,**JSON 报文会解析失败**" +
-			"\n       (框架先按 JSON 解析,失败后落到 XML 路径),表现是程序一路退出、断点不命中;" +
-			"\n       wsdebug 遇到这种情况会告警。要改入参也只能走 --request-file(拿不到完整原文)。"
+		// 源文件已清理时重放用的就是这段残缺文本,JSON 报文会直接崩在解析上。
+		note = "\n     ← 服务器上的原文件已清理,重放只能用这段残缺文本。" +
+			"\n       JSON 报文会解析失败(框架先按 JSON 解析,失败后落到 XML 路径)," +
+			"\n       表现是程序一路退出、断点不命中;wsdebug 遇到这种情况会告警。" +
+			"\n       这条也改不了入参(拿不到完整原文),只能原样重放或换个样本。"
 	}
-	fmt.Printf("\n── 请求报文(%d 字符)%s\n%s\n", len(r.Content.Request), note, r.Content.Request)
+	fmt.Printf("\n── 请求报文(%d 字符 · %s)%s\n%s\n", len(r.Content.Request), verdict, note, r.Content.Request)
 	fmt.Printf("\n── 响应报文(%d 字符)\n%s\n", len(r.Content.Response), r.Content.Response)
 	return nil
 }

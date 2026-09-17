@@ -51,7 +51,7 @@ rem 便携标记:CLI/桌面版据此把配置留在包内而不是写用户目�
 type nul > "%STAGE%\.portable"
 
 echo [4/4] Packing zip ...
-python -c "import zipfile, os; root='dist/tdebug-portable'; z=zipfile.ZipFile('dist/tdebug-portable.zip','w',zipfile.ZIP_DEFLATED); [z.write(os.path.join(root,n),'tdebug-portable/'+n) for n in os.listdir(root)]; z.close()" >nul 2>nul
+python "%~dp0build_portable_zip.py" "%STAGE%" "dist/tdebug-portable.zip"
 if errorlevel 1 (
     echo   python unavailable, falling back to PowerShell ...
     powershell -NoProfile -Command "Compress-Archive -Path '%STAGE%' -DestinationPath 'dist\tdebug-portable.zip' -Force" >nul 2>nul
